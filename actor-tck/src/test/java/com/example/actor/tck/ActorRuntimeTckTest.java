@@ -7,6 +7,7 @@ import com.example.actor.ActorSystem;
 import com.example.actor.PoisonPill;
 import com.example.actor.SendResult;
 import com.example.actor.ShutdownReport;
+import com.example.actor.testkit.ActorTestKit;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -32,8 +33,7 @@ class ActorRuntimeTckTest {
             }, ActorOptions.builder().mailboxCapacity(16).build());
             for (int i = 0; i < 4; i++) assertEquals(SendResult.ACCEPTED, ref.send(i));
             assertEquals(SendResult.ACCEPTED, ref.send(PoisonPill.INSTANCE));
-            for (int i = 0; i < 100 && !ref.isTerminated(); i++) Thread.sleep(10);
-            assertTrue(ref.isTerminated());
+            ActorTestKit.awaitTerminated(ref, Duration.ofSeconds(5));
             assertEquals(Set.of(0, 1, 2, 3), received);
         }
     }

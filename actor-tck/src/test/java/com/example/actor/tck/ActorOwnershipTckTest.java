@@ -10,6 +10,7 @@ import com.example.actor.DeadLetterListener;
 import com.example.actor.ManagedActorRef;
 import com.example.actor.SendResult;
 import com.example.actor.ShutdownReport;
+import com.example.actor.testkit.ActorTestKit;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -62,10 +63,8 @@ class ActorOwnershipTckTest {
 
             // Prove the activation actually reached the gap: without the staged
             // back-off it would still be spinning inside poll() instead.
-            for (int i = 0; i < 500 && system.metrics().reservationStallCount() == 0; i++) {
-                Thread.sleep(10);
-            }
-            assertTrue(system.metrics().reservationStallCount() > 0,
+            ActorTestKit.awaitCondition(() -> system.metrics().reservationStallCount() > 0,
+                    Duration.ofSeconds(5),
                     "the activation must observe and abandon the unpublished reservation");
 
             // The activation gives the carrier back rather than spinning, so an
@@ -110,7 +109,8 @@ class ActorOwnershipTckTest {
             }
             restarter.join(30_000);
 
-            for (int i = 0; i < 500 && processed.get() == 0; i++) Thread.sleep(10);
+            ActorTestKit.awaitCondition(() -> processed.get() > 0, Duration.ofSeconds(5),
+                    "the actor must process at least one message across the restarts");
         }
         assertFalse(overlapped.get(), "two activations consumed the same mailbox");
         assertTrue(processed.get() > 0, "the actor must keep making progress across restarts");
@@ -132,8 +132,7 @@ class ActorOwnershipTckTest {
 
                 for (int i = 0; i < 16; i++) ref.send(i);
                 ref.stop();
-                for (int i = 0; i < 200 && !ref.isTerminated(); i++) Thread.sleep(1);
-                assertTrue(ref.isTerminated(), "stop must terminate the actor");
+                ActorTestKit.awaitTerminated(ref, Duration.ofSeconds(5));
             }
             assertFalse(overlapped.get(), "the terminal drain overlapped a running activation");
         }

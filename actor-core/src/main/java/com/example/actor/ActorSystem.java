@@ -26,6 +26,9 @@ public final class ActorSystem implements AutoCloseable {
     private final Set<ActorCell<?>> actors = ConcurrentHashMap.newKeySet();
     private final ActorMetrics metrics = new ActorMetrics();
     private final Object terminationMonitor = new Object();
+    private final ActorScheduler scheduler;
+    private final boolean ownsScheduler;
+    private volatile int quiescenceWatchers;
 
     public ActorSystem() {
         this(ActorSystemOptions.defaults());
@@ -34,6 +37,9 @@ public final class ActorSystem implements AutoCloseable {
     public ActorSystem(ActorSystemOptions options) {
         this.systemOptions = Objects.requireNonNull(options, "options");
         this.executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        ActorScheduler supplied = options.scheduler();
+        this.ownsScheduler = supplied == null;
+        this.scheduler = ownsScheduler ? new SystemScheduler() : supplied;
     }
 
     public ActorSystemOptions options() {
@@ -67,6 +73,73 @@ public final class ActorSystem implements AutoCloseable {
 
     public ActorMetrics metrics() {
         return metrics;
+    }
+
+    /** The time source used by actor timers. */
+    public ActorScheduler scheduler() {
+        return scheduler;
+    }
+
+    /** True when no actor is running or holds queued messages. */
+    public boolean isQuiescent() {
+        for (ActorCell<?> cell : actors) {
+            if (!cell.isQuiescent()) return false;
+        }
+        return true;
+    }
+
+    /** Names of the actors that are running or still hold queued messages. */
+    public java.util.List<String> busyActorNames() {
+        java.util.List<String> busy = new java.util.ArrayList<>();
+        for (ActorCell<?> cell : actors) {
+            if (!cell.isQuiescent()) busy.add(cell.describeBusy());
+        }
+        return java.util.List.copyOf(busy);
+    }
+
+    /**
+     * Waits until no actor is running or holds queued messages.
+     *
+     * <p>Quiescence is only meaningful once the callers that were sending have
+     * stopped: a producer may always enqueue more work. It is the deterministic
+     * replacement for polling {@code Thread.sleep} while waiting for actors to
+     * finish, and is also useful for draining before a planned shutdown.</p>
+     *
+     * @return true when the system became quiescent before the deadline
+     */
+    public boolean awaitQuiescent(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        long deadline = saturatingAdd(System.nanoTime(), timeout.toNanos());
+        synchronized (terminationMonitor) {
+            quiescenceWatchers++;
+            try {
+                while (!isQuiescent()) {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0) return false;
+                    try {
+                        terminationMonitor.wait(remaining / 1_000_000L, (int) (remaining % 1_000_000L));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                }
+                return true;
+            } finally {
+                quiescenceWatchers--;
+            }
+        }
+    }
+
+    /**
+     * Wakes {@link #awaitQuiescent(Duration)} waiters after an activation went
+     * idle. The volatile read keeps the cost off the message path when nobody
+     * is waiting, which is the common case.
+     */
+    void notifyPossiblyQuiescent() {
+        if (quiescenceWatchers == 0) return;
+        synchronized (terminationMonitor) {
+            terminationMonitor.notifyAll();
+        }
     }
 
     public int actorCount() {
@@ -138,6 +211,7 @@ public final class ActorSystem implements AutoCloseable {
         if (!executor.isTerminated()) {
             executor.shutdownNow();
         }
+        if (ownsScheduler) scheduler.close();
         lifecycle.set(Lifecycle.CLOSED);
         synchronized (terminationMonitor) {
             terminationMonitor.notifyAll();
@@ -227,6 +301,18 @@ public final class ActorSystem implements AutoCloseable {
 
         private void initialize() {
             state.initialize();
+        }
+
+        private boolean isQuiescent() {
+            ActorState.Lifecycle life = state.lifecycle();
+            boolean settled = life == ActorState.Lifecycle.IDLE
+                    || life == ActorState.Lifecycle.NEW
+                    || life == ActorState.Lifecycle.TERMINATED;
+            return settled && state.mailboxCount() == 0;
+        }
+
+        private String describeBusy() {
+            return name + "[" + state.lifecycle() + ", mailbox=" + state.mailboxCount() + "]";
         }
 
         private MpscBoundedArrayQueue<Envelope<M>> mailbox() {
@@ -598,6 +684,7 @@ public final class ActorSystem implements AutoCloseable {
                     ActorState.Completion completion = state.completeRun();
                     if (completion == ActorState.Completion.MORE_WORK) system.schedule(this);
                     else if (completion == ActorState.Completion.STOPPING) terminateFromSystem();
+                    else system.notifyPossiblyQuiescent();
                 }
             }
         }
