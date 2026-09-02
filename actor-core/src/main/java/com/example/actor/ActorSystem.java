@@ -311,7 +311,7 @@ public final class ActorSystem implements AutoCloseable {
         }
     }
 
-    private static final class ActorCell<M> implements ManagedActorRef<M>, Timers<M> {
+    private static final class ActorCell<M> implements ManagedActorRef<M>, ActorCellView<M> {
         /** Spins that cover a producer which is a few instructions behind. */
         private static final int GAP_SPINS = 64;
         /** Yields that release the carrier so a descheduled producer can run. */
@@ -333,6 +333,15 @@ public final class ActorSystem implements AutoCloseable {
         private Throwable pendingDrainCause;
         private final ConcurrentHashMap<Object, TimerEntry> timers = new ConcurrentHashMap<>();
         private final AtomicLong timerGenerations = new AtomicLong();
+        // Message buffers are touched only by the activation that owns the
+        // cell, so they need no synchronisation. They stay null until used: an
+        // ArrayDeque allocates its array eagerly, which a million idle actors
+        // would pay for without ever stashing anything.
+        private java.util.ArrayDeque<Envelope<M>> stash;
+        private java.util.ArrayDeque<Envelope<M>> redeliver;
+        private Envelope<M> currentEnvelope;
+        private boolean currentStashed;
+        private boolean unstashRequested;
 
         private ActorCell(ActorSystem system, Supplier<? extends Actor<M>> factory,
                           ActorOptions options, String name) {
@@ -635,6 +644,78 @@ public final class ActorSystem implements AutoCloseable {
         }
 
         @Override
+        public void stashCurrent() {
+            Envelope<M> envelope = currentEnvelope;
+            if (envelope == null) {
+                throw new IllegalStateException("stash() is only valid while handling a message");
+            }
+            if (currentStashed) {
+                throw new IllegalStateException("the current message is already stashed");
+            }
+            int stashed = stash == null ? 0 : stash.size();
+            if (stashed >= options.stashCapacity()) {
+                throw new StashOverflowException("stash is full for " + name
+                        + " at capacity " + options.stashCapacity());
+            }
+            if (stash == null) stash = new java.util.ArrayDeque<>();
+            stash.addLast(envelope);
+            currentStashed = true;
+        }
+
+        @Override
+        public void requestUnstashAll() {
+            unstashRequested = true;
+        }
+
+        @Override
+        public int stashSize() {
+            return stash == null ? 0 : stash.size();
+        }
+
+        /**
+         * Moves stashed messages back in front of the mailbox. They gave up
+         * their mailbox reservation when they were stashed, so each one takes
+         * capacity again here.
+         */
+        private void unstashAllNow() {
+            if (stash == null) return;
+            Envelope<M> stashed;
+            while ((stashed = stash.pollFirst()) != null) {
+                ActorState.EnqueueResult reservation = state.reserveMessage();
+                if (reservation == ActorState.EnqueueResult.FULL) {
+                    system.metrics.full();
+                    completeFailure(stashed, new RejectedExecutionException(
+                            "mailbox full while unstashing: " + name));
+                    system.deadLetter(this, stashed.message, DeadLetterListener.Reason.MAILBOX_FULL);
+                    continue;
+                }
+                if (reservation == ActorState.EnqueueResult.TERMINATED) {
+                    completeFailure(stashed, new CancellationException("actor terminated: " + name));
+                    system.deadLetter(this, stashed.message, DeadLetterListener.Reason.TERMINATED);
+                    continue;
+                }
+                if (redeliver == null) redeliver = new java.util.ArrayDeque<>();
+                redeliver.addLast(stashed);
+            }
+        }
+
+        private void discardBufferedMessages(Throwable cause) {
+            Envelope<M> pending;
+            while (stash != null && (pending = stash.pollFirst()) != null) {
+                completeFailure(pending, cause);
+                system.deadLetter(this, pending.message, DeadLetterListener.Reason.TERMINATED);
+            }
+            while (redeliver != null && (pending = redeliver.pollFirst()) != null) {
+                state.releaseMessageIfPresent();
+                completeFailure(pending, cause);
+                system.deadLetter(this, pending.message, DeadLetterListener.Reason.TERMINATED);
+            }
+            currentEnvelope = null;
+            currentStashed = false;
+            unstashRequested = false;
+        }
+
+        @Override
         public String name() { return name; }
 
         @Override
@@ -760,8 +841,11 @@ public final class ActorSystem implements AutoCloseable {
                 while (processed < options.maxBatch()
                         && state.lifecycle() == ActorState.Lifecycle.RUNNING
                         && state.mailboxCount() > 0) {
+                    // Re-delivered messages hold mailbox reservations of their
+                    // own, so the count above already accounts for them.
                     activationCancellation.token().throwIfCancelled();
-                    Envelope<M> envelope = pollMailbox();
+                    Envelope<M> envelope = redeliver == null || redeliver.isEmpty()
+                            ? pollMailbox() : takeRedelivered();
                     if (envelope == null) {
                         // The mailbox count is non-zero but the head slot has not
                         // been published: a producer is inside its reservation
@@ -791,8 +875,10 @@ public final class ActorSystem implements AutoCloseable {
                         terminate(new CancellationException("PoisonPill"));
                         return;
                     }
-                    ActorContext<M> context = new ActorContext<>(this, this, system,
+                    ActorContext<M> context = new ActorContext<>(this, system,
                             activationCancellation.token(), envelope.traceContext, envelope.reply);
+                    currentEnvelope = envelope;
+                    currentStashed = false;
                     ActorEvents.MessageEvent event = ActorEvents.beginMessage(name,
                             envelope.message.getClass().getName());
                     boolean success = false;
@@ -809,10 +895,19 @@ public final class ActorSystem implements AutoCloseable {
                     } finally {
                         ActorEvents.endMessage(event, success);
                     }
-                    // Completed here, outside the ScopedValue binding, so that a
-                    // dependent stage of the ask future cannot observe the
-                    // ActorContext or inherit the TraceContext of this actor.
-                    completeReply(envelope, context);
+                    if (unstashRequested) {
+                        unstashRequested = false;
+                        unstashAllNow();
+                    }
+                    // A stashed message has not been handled yet, so its ask
+                    // future stays open until it is unstashed and processed.
+                    if (!currentStashed) {
+                        // Completed here, outside the ScopedValue binding, so that
+                        // a dependent stage of the ask future cannot observe the
+                        // ActorContext or inherit the TraceContext of this actor.
+                        completeReply(envelope, context);
+                    }
+                    currentEnvelope = null;
                     processed++;
                 }
             } catch (Throwable caught) {
@@ -846,6 +941,12 @@ public final class ActorSystem implements AutoCloseable {
                     else system.notifyPossiblyQuiescent();
                 }
             }
+        }
+
+        private Envelope<M> takeRedelivered() {
+            Envelope<M> envelope = redeliver.pollFirst();
+            if (envelope != null) state.releaseMessage();
+            return envelope;
         }
 
         private Envelope<M> pollMailbox() {
@@ -898,8 +999,10 @@ public final class ActorSystem implements AutoCloseable {
          */
         private void restartNow(boolean fromOwner) {
             try {
-                // A new instance must not inherit timers armed by the old one.
+                // A new instance must not inherit timers or deferred messages
+                // armed by the old one.
                 cancelAll();
+                discardBufferedMessages(new CancellationException("actor restarted: " + name));
                 actor = Objects.requireNonNull(factory.get(), "actorFactory returned null");
                 cancellation = new CancellationSource();
                 restartRequested = false;
@@ -967,6 +1070,7 @@ public final class ActorSystem implements AutoCloseable {
 
         private void drainMailbox(Throwable cause) {
             cancelAll();
+            discardBufferedMessages(cause);
             MpscBoundedArrayQueue<Envelope<M>> currentMailbox = mailbox;
             if (currentMailbox == null) return;
             Envelope<M> pending;

@@ -8,6 +8,7 @@ public final class ActorOptions {
     private final MailboxOverflowStrategy overflowStrategy;
     private final int maxBatch;
     private final int reductionBudget;
+    private final int stashCapacity;
 
     private ActorOptions(Builder builder) {
         this.name = builder.name;
@@ -15,6 +16,7 @@ public final class ActorOptions {
         this.overflowStrategy = builder.overflowStrategy;
         this.maxBatch = builder.maxBatch;
         this.reductionBudget = builder.reductionBudget;
+        this.stashCapacity = builder.stashCapacity < 0 ? builder.mailboxCapacity : builder.stashCapacity;
     }
 
     public static Builder builder() {
@@ -31,12 +33,16 @@ public final class ActorOptions {
     public int maxBatch() { return maxBatch; }
     public int reductionBudget() { return reductionBudget; }
 
+    /** Deferred messages an actor may hold; defaults to the mailbox capacity. */
+    public int stashCapacity() { return stashCapacity; }
+
     public static final class Builder {
         private String name = "actor";
         private int mailboxCapacity = 1024;
         private MailboxOverflowStrategy overflowStrategy = MailboxOverflowStrategy.FAIL_FAST;
         private int maxBatch = 256;
         private int reductionBudget = 4096;
+        private int stashCapacity = -1;
 
         public Builder name(String name) {
             this.name = Objects.requireNonNull(name, "name");
@@ -63,6 +69,12 @@ public final class ActorOptions {
             return this;
         }
 
+        /** Defaults to the mailbox capacity when left unset. */
+        public Builder stashCapacity(int stashCapacity) {
+            this.stashCapacity = stashCapacity;
+            return this;
+        }
+
         public ActorOptions build() {
             if (mailboxCapacity < 1 || mailboxCapacity > 65535) {
                 throw new IllegalArgumentException("mailboxCapacity must be between 1 and 65535");
@@ -72,6 +84,9 @@ public final class ActorOptions {
             }
             if (reductionBudget < 2 || Integer.bitCount(reductionBudget) != 1) {
                 throw new IllegalArgumentException("reductionBudget must be a power of two >= 2");
+            }
+            if (stashCapacity >= 0 && stashCapacity > 65535) {
+                throw new IllegalArgumentException("stashCapacity must be between 0 and 65535");
             }
             return new ActorOptions(this);
         }

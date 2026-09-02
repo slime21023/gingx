@@ -12,8 +12,7 @@ import java.util.concurrent.CompletableFuture;
 public final class ActorContext<M> {
     public static final java.lang.ScopedValue<ActorContext<?>> CURRENT = java.lang.ScopedValue.newInstance();
 
-    private final ActorRef<M> self;
-    private final Timers<M> timers;
+    private final ActorCellView<M> cell;
     private final ActorSystem system;
     private final CancellationToken cancellation;
     private final TraceContext traceContext;
@@ -21,10 +20,9 @@ public final class ActorContext<M> {
     private Object replyValue;
     private boolean replied;
 
-    ActorContext(ActorRef<M> self, Timers<M> timers, ActorSystem system, CancellationToken cancellation,
+    ActorContext(ActorCellView<M> cell, ActorSystem system, CancellationToken cancellation,
                  TraceContext traceContext, CompletableFuture<Object> reply) {
-        this.self = Objects.requireNonNull(self, "self");
-        this.timers = Objects.requireNonNull(timers, "timers");
+        this.cell = Objects.requireNonNull(cell, "cell");
         this.system = Objects.requireNonNull(system, "system");
         this.cancellation = Objects.requireNonNull(cancellation, "cancellation");
         this.traceContext = Objects.requireNonNull(traceContext, "traceContext");
@@ -36,9 +34,43 @@ public final class ActorContext<M> {
     }
 
     /** The typed reference of the actor currently handling a message. */
-    public ActorRef<M> self() { return self; }
+    public ActorRef<M> self() { return cell; }
     /** Keyed timers for this actor; see {@link Timers}. */
-    public Timers<M> timers() { return timers; }
+    public Timers<M> timers() { return cell; }
+
+    /**
+     * Defers the message being handled until {@link #unstashAll()}.
+     *
+     * <p>The usual shape is an actor that is not ready yet: it stashes work
+     * until initialisation completes, then unstashes. A stashed message keeps
+     * its place ahead of newer mail, and a stashed ask keeps its future open
+     * until the message is finally handled.</p>
+     *
+     * <p>A stashed message no longer occupies mailbox capacity, so the stash
+     * has its own bound: {@code ActorOptions.stashCapacity}.</p>
+     *
+     * @throws StashOverflowException when the stash is full
+     */
+    public void stash() {
+        cell.stashCurrent();
+    }
+
+    /**
+     * Re-delivers every stashed message, in the order it was stashed, ahead of
+     * the messages still in the mailbox.
+     *
+     * <p>Re-delivery takes mailbox capacity again, so a message can be rejected
+     * here; that is reported as a dead letter rather than silently dropped.
+     * Messages are handed back after the current handler returns.</p>
+     */
+    public void unstashAll() {
+        cell.requestUnstashAll();
+    }
+
+    /** Messages currently deferred by {@link #stash()}. */
+    public int stashSize() {
+        return cell.stashSize();
+    }
 
     public ActorSystem system() { return system; }
     public CancellationToken cancellation() { return cancellation; }
