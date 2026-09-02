@@ -19,7 +19,7 @@ class ActorMetricsBinderTest {
             CountDownLatch processed = new CountDownLatch(1);
             system.spawn(() -> new Actor<String>() {
                 @Override
-                protected void onMessage(String message, com.example.actor.ActorContext context) {
+                protected void onMessage(String message, com.example.actor.ActorContext<String> context) {
                     processed.countDown();
                 }
             }).send("message");

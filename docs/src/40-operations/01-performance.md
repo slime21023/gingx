@@ -67,9 +67,9 @@ latency。若測試沒有收集其中一項，應標記為 incomplete，而不�
 
 | 現象 | 優先檢查 |
 |---|---|
-| throughput 降低 | CPU pinning、JDK、chunk size、producer contention、GC |
+| throughput 降低 | CPU pinning、JDK、mailbox capacity、producer contention、GC |
 | P99 上升但平均值不變 | allocation slow path、CAS retry、carrier oversubscription、yield |
 | mailbox 長期佔用上升 | producer rate、`maxBatch`、overflow 結果是否被忽略 |
-| 百萬 actor RSS 上升 | lazy mailbox 是否觸發、queue chunk retention、測試 fixture 是否保留 ref |
+| 百萬 actor RSS 上升 | lazy mailbox 是否觸發、mailbox capacity 設定、測試 fixture 是否保留 ref |
 | shutdown 超時 | handler cancellation checkpoints、阻塞 I/O、未關閉 ingress |
 

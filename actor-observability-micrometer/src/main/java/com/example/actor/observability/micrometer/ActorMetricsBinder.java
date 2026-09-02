@@ -27,6 +27,8 @@ public final class ActorMetricsBinder implements MeterBinder {
         counter(registry, "actor.restarts", "Actor restarts", ActorMetrics::restartCount);
         counter(registry, "actor.preemptions", "Cooperative preemptions", ActorMetrics::preemptionCount);
         counter(registry, "actor.cancellations", "Actor cancellations", ActorMetrics::cancellationCount);
+        counter(registry, "actor.mailbox.reservation.stalls", "Activations abandoned on an unpublished mailbox reservation",
+                ActorMetrics::reservationStallCount);
     }
 
     private void counter(MeterRegistry registry, String name, String description,

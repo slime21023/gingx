@@ -24,7 +24,7 @@ class ActorStressTest {
         try (ActorSystem system = new ActorSystem(); var producers = Executors.newFixedThreadPool(producerCount)) {
             var actor = system.spawn(() -> new Actor<Integer>() {
                 @Override
-                protected void onMessage(Integer message, com.example.actor.ActorContext context) {
+                protected void onMessage(Integer message, com.example.actor.ActorContext<Integer> context) {
                     received.incrementAndGet();
                     complete.countDown();
                 }

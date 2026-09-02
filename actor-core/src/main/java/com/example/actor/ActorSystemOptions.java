@@ -7,10 +7,14 @@ import java.util.Objects;
 public final class ActorSystemOptions {
     private final ActorOptions defaultActorOptions;
     private final Duration shutdownTimeout;
+    private final DeadLetterListener deadLetterListener;
+    private final ActorScheduler scheduler;
 
     private ActorSystemOptions(Builder builder) {
         this.defaultActorOptions = builder.defaultActorOptions;
         this.shutdownTimeout = builder.shutdownTimeout;
+        this.deadLetterListener = builder.deadLetterListener;
+        this.scheduler = builder.scheduler;
     }
 
     public static Builder builder() {
@@ -29,9 +33,21 @@ public final class ActorSystemOptions {
         return shutdownTimeout;
     }
 
+    /** @return the dead letter listener, or null when undelivered messages are only counted */
+    public DeadLetterListener deadLetterListener() {
+        return deadLetterListener;
+    }
+
+    /** @return the caller-supplied scheduler, or null when the system owns a default one */
+    public ActorScheduler scheduler() {
+        return scheduler;
+    }
+
     public static final class Builder {
         private ActorOptions defaultActorOptions = ActorOptions.defaults();
         private Duration shutdownTimeout = Duration.ofSeconds(30);
+        private DeadLetterListener deadLetterListener;
+        private ActorScheduler scheduler;
 
         public Builder defaultActorOptions(ActorOptions options) {
             this.defaultActorOptions = Objects.requireNonNull(options, "defaultActorOptions");
@@ -44,6 +60,22 @@ public final class ActorSystemOptions {
                 throw new IllegalArgumentException("shutdownTimeout must be positive");
             }
             this.shutdownTimeout = timeout;
+            return this;
+        }
+
+        /** Passing null keeps the default of counting undelivered messages only. */
+        public Builder deadLetterListener(DeadLetterListener listener) {
+            this.deadLetterListener = listener;
+            return this;
+        }
+
+        /**
+          * Supplies the time source for actor timers. A supplied scheduler is
+          * owned by the caller and is not closed by the actor system; passing
+          * null keeps the system-owned default.
+          */
+        public Builder scheduler(ActorScheduler scheduler) {
+            this.scheduler = scheduler;
             return this;
         }
 

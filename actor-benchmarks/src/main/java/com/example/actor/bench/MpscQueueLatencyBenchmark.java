@@ -1,6 +1,6 @@
 package com.example.actor.bench;
 
-import com.example.queue.MpscChunkedArrayQueue;
+import com.example.queue.MpscBoundedArrayQueue;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -24,14 +24,17 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 5)
 @Fork(2)
 public class MpscQueueLatencyBenchmark {
+    /** The maximum mailbox capacity the runtime supports. */
+    private static final int MAILBOX_CAPACITY = 65_536;
+
     @State(Scope.Group)
     public static class QueueState {
-        MpscChunkedArrayQueue<Object> queue;
+        MpscBoundedArrayQueue<Object> queue;
         Object message;
 
         @Setup(Level.Iteration)
         public void setup() {
-            queue = new MpscChunkedArrayQueue<>(1024);
+            queue = new MpscBoundedArrayQueue<>(MAILBOX_CAPACITY);
             message = new Object();
         }
     }

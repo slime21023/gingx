@@ -68,8 +68,12 @@ void removeTerminationListener(TerminationListener listener);
 ```
 
 `send` 不代表 handler 已執行，只代表訊息在當下被接受、丟棄或拒絕。`ask`
-回傳 `CompletionStage`，handler 以 `context.reply(value)` 完成回覆；timeout、
+回傳 `CompletionStage`，handler 以 `context.reply(value)` 記錄回覆；timeout、
 overflow、actor failure 或 shutdown 都應由呼叫端處理。
+
+Future 在 handler 返回之後才完成，而不是在 `reply()` 當下。掛在其上的
+dependent stage 會在 actor 的 activation thread 上執行，但已離開該 actor 的
+`ScopedValue` binding；若 stage 的工作不輕量，應自行指定 executor。
 
 Groovy 可使用 `ref << message`；Java 仍建議直接使用 `send`，因為它會回傳
 明確的 `SendResult`。
@@ -82,11 +86,24 @@ Groovy 可使用 `ref << message`；Java 仍建議直接使用 `send`，因為�
 | `mailboxCapacity` | `1024` | `1..65535`，logical reservation 上限 |
 | `overflowStrategy` | `FAIL_FAST` | 滿載時回傳／執行的策略 |
 | `maxBatch` | `256` | 一次 activation 最多處理幾則訊息 |
-| `reductionBudget` | `4096` | Groovy preemption 的 2 的冪次 budget |
+| `reductionBudget` | `4096` | preemption 的 2 的冪次 budget |
+| `stashCapacity` | 同 `mailboxCapacity` | `stash()` 可延後的訊息上限 |
 
 `reductionBudget` 必須是大於等於 2 的 2 的冪次；它只會影響有 reduction tick
 的程式路徑。`maxBatch` 是 mailbox 公平性邊界，不能取代 CPU 密集迴圈的
 `@Preemptive` instrumentation。
+
+Groovy 的 `@Preemptive` 會自動插入 tick。**Java 程式碼可以自己呼叫
+`ReductionBudget.tickCurrent()`** 在自己的迴圈裡加檢查點，達到同樣效果：
+
+```java
+for (int i = 0; i < limit; i++) {
+    ReductionBudget.tickCurrent();   // 讓步點：檢查取消並讓出 carrier
+    accumulate(i);
+}
+```
+
+沒有這個呼叫的 Java CPU 迴圈不會被自動中斷。
 
 ## `ActorContext`
 
@@ -98,7 +115,10 @@ Groovy 可使用 `ref << message`；Java 仍建議直接使用 `send`，因為�
 | `system()` | 所屬 `ActorSystem` |
 | `cancellation()` | activation 的取消 token |
 | `traceContext()` | 目前訊息攜帶的 trace context |
-| `reply(value)` | 完成目前 `ask`；對 `send` 訊息呼叫會丟 `IllegalStateException` |
+| `reply(value)` | **deprecated**。記錄目前 `ask` 的回覆；改用請求攜帶的 `replyTo` |
+| `timers()` | 本 actor 的 keyed timer |
+| `stash()` / `unstashAll()` / `stashSize()` | 延後與重新投遞訊息 |
+| `spawnChild(factory, options)` / `childCount()` | 建立生命期被包含的 child actor |
 | `ActorContext.current()` | 由 `ScopedValue` 取得目前 context |
 
 不要把 context 保存到 actor state 或跨執行緒延後使用；需要的值應在 handler

@@ -41,7 +41,25 @@ Core 使用 `LongAdder` 提供低爭用 counters：
 ```text
 accepted / full / dropped / processed
 failures / restarts / preemptions / cancellations
+reservationStalls
 ```
+
+`reservationStalls` 記錄 activation 因為某個 producer 保留了 mailbox slot
+卻未發佈而放棄的次數，見[排程與公平性](07-scheduling-and-fairness.md)。
+
+## Dead letter
+
+Counter 只說明「有訊息被拒絕」。若要知道被拒絕的是哪一筆，於
+`ActorSystemOptions` 掛上 `DeadLetterListener`：
+
+```text
+MAILBOX_FULL    有界 mailbox 在 fail-fast 下拒絕
+DROPPED         overflow 策略丟棄
+TERMINATED      目標 actor 正在停止或已終止
+SYSTEM_CLOSED   ActorSystem 正在關閉或已關閉
+```
+
+Listener 在拒絕該訊息的那條執行緒上執行，不可阻塞它。
 
 Micrometer adapter 以 `FunctionCounter` 讀取這些值，避免讓 metrics registry
 依賴進入 core。

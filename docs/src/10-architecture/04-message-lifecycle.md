@@ -69,10 +69,19 @@ ask(message, timeout)
     ├── 建立 CompletableFuture
     ├── 將 future 放入 Envelope
     ├── future.orTimeout(...)
-    └── ActorContext.reply(value) 完成 future
+    ├── ActorContext.reply(value) 記錄回覆值
+    └── handler 返回後，runtime 完成 future
 ```
 
 如果訊息被拒絕或 drop，future 會以 exception 完成，而不是永久等待。
+
+`reply()` 只記錄回覆值，future 由 runtime 在 handler 返回之後、離開
+`ScopedValue` binding 之外才完成。若在 binding 之內完成，呼叫端掛在 future
+上的 `thenApply` / `thenAccept` 會帶著 replying actor 的 `ActorContext` 與
+`TraceContext` 執行，從那裡送出的訊息會繼承錯誤的 trace。
+
+已經回覆過的 handler 即使隨後拋出例外，回覆仍然成立；actor 照常進入失敗
+處理。
 
 ## 系統訊息
 

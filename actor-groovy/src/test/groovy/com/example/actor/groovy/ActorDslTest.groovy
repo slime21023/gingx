@@ -23,7 +23,7 @@ class ActorDslTest {
         def system = new ActorSystem()
         def ref = system.spawn({ -> new Actor<Integer>() {
             @Override
-            protected void onMessage(Integer message, com.example.actor.ActorContext context) {
+            protected void onMessage(Integer message, com.example.actor.ActorContext<Integer> context) {
                 received.complete(message)
             }
         }}, ActorOptions.defaults())

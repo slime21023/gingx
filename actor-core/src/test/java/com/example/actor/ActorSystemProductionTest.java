@@ -22,7 +22,7 @@ class ActorSystemProductionTest {
             assertEquals(actorOptions, system.options().defaultActorOptions());
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                 }
             });
             assertTrue(ref.name().startsWith("defaulted-"));
@@ -34,7 +34,7 @@ class ActorSystemProductionTest {
         ActorSystem system = new ActorSystem();
         ActorRef<String> ref = system.spawn(() -> new Actor<>() {
             @Override
-            protected void onMessage(String message, ActorContext context) {
+            protected void onMessage(String message, ActorContext<String> context) {
             }
         });
         ShutdownReport report = system.shutdown(Duration.ofSeconds(2));
@@ -49,7 +49,7 @@ class ActorSystemProductionTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, ActorContext context) throws Exception {
+                protected void onMessage(String message, ActorContext<String> context) throws Exception {
                     entered.countDown();
                     Thread.sleep(Duration.ofSeconds(5));
                 }

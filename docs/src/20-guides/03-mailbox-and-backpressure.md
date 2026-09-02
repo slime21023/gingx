@@ -14,7 +14,8 @@ ActorOptions options = ActorOptions.builder()
         .build();
 ```
 
-Mailbox capacity 是 logical reservation 上限，不是 queue chunk 的大小。
+Mailbox capacity 是 logical reservation 上限；queue 本身是一個容量向上取到
+2 的冪次的定容 ring，因此物理容量恆不小於它。
 
 ## 策略選擇
 

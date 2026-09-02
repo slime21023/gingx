@@ -7,6 +7,7 @@ import com.example.actor.ActorSystem;
 import com.example.actor.PoisonPill;
 import com.example.actor.SendResult;
 import com.example.actor.ShutdownReport;
+import com.example.actor.testkit.ActorTestKit;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -26,14 +27,13 @@ class ActorRuntimeTckTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Object> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Object message, com.example.actor.ActorContext context) {
+                protected void onMessage(Object message, com.example.actor.ActorContext<Object> context) {
                     if (message instanceof Integer value) received.add(value);
                 }
             }, ActorOptions.builder().mailboxCapacity(16).build());
             for (int i = 0; i < 4; i++) assertEquals(SendResult.ACCEPTED, ref.send(i));
             assertEquals(SendResult.ACCEPTED, ref.send(PoisonPill.INSTANCE));
-            for (int i = 0; i < 100 && !ref.isTerminated(); i++) Thread.sleep(10);
-            assertTrue(ref.isTerminated());
+            ActorTestKit.awaitTerminated(ref, Duration.ofSeconds(5));
             assertEquals(Set.of(0, 1, 2, 3), received);
         }
     }
@@ -44,7 +44,7 @@ class ActorRuntimeTckTest {
         try (ActorSystem system = new ActorSystem(ActorSystemOptionsForTest.options())) {
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, com.example.actor.ActorContext context) throws Exception {
+                protected void onMessage(String message, com.example.actor.ActorContext<String> context) throws Exception {
                     entered.countDown();
                     try {
                         new CountDownLatch(1).await();
@@ -80,7 +80,7 @@ class ActorRuntimeTckTest {
             ActorRef<Integer> ref = supervisor.spawn(new com.example.actor.supervisor.ChildSpec<>(
                     "random", () -> new Actor<>() {
                         @Override
-                        protected void onMessage(Integer message, com.example.actor.ActorContext context) {
+                        protected void onMessage(Integer message, com.example.actor.ActorContext<Integer> context) {
                             if (delivered.add(message) && injectedFailures.contains(message)
                                     && failedOnce.add(message)) {
                                 throw new IllegalStateException("injected");

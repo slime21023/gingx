@@ -1,6 +1,6 @@
 package com.example.actor;
 
-import com.example.queue.MpscChunkedArrayQueue;
+import com.example.queue.MpscBoundedArrayQueue;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -26,6 +26,9 @@ public final class ActorSystem implements AutoCloseable {
     private final Set<ActorCell<?>> actors = ConcurrentHashMap.newKeySet();
     private final ActorMetrics metrics = new ActorMetrics();
     private final Object terminationMonitor = new Object();
+    private final ActorScheduler scheduler;
+    private final boolean ownsScheduler;
+    private volatile int quiescenceWatchers;
 
     public ActorSystem() {
         this(ActorSystemOptions.defaults());
@@ -34,6 +37,9 @@ public final class ActorSystem implements AutoCloseable {
     public ActorSystem(ActorSystemOptions options) {
         this.systemOptions = Objects.requireNonNull(options, "options");
         this.executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        ActorScheduler supplied = options.scheduler();
+        this.ownsScheduler = supplied == null;
+        this.scheduler = ownsScheduler ? new SystemScheduler() : supplied;
     }
 
     public ActorSystemOptions options() {
@@ -49,14 +55,30 @@ public final class ActorSystem implements AutoCloseable {
     }
 
     public <M> ManagedActorRef<M> spawnManaged(Supplier<? extends Actor<M>> factory, ActorOptions options) {
+        return spawnCell(null, factory, options);
+    }
+
+    private <M> ActorCell<M> spawnCell(ActorCell<?> parent, Supplier<? extends Actor<M>> factory,
+                                       ActorOptions options) {
         Objects.requireNonNull(factory, "factory");
         Objects.requireNonNull(options, "options");
         if (lifecycle.get() != Lifecycle.OPEN) {
             throw new IllegalStateException("ActorSystem is closed");
         }
-        String name = options.name() + "-" + ids.incrementAndGet();
-        ActorCell<M> cell = new ActorCell<>(this, factory, options, name);
+        String name = (parent == null ? "" : parent.name + "/") + options.name() + "-" + ids.incrementAndGet();
+        ActorCell<M> cell = new ActorCell<>(this, factory, options, name, parent);
         actors.add(cell);
+        if (parent != null) {
+            parent.children.add(cell);
+            if (parent.isTerminated()) {
+                // The parent terminated while this child was being created, so
+                // nothing would ever stop the child.
+                parent.children.remove(cell);
+                cell.initialize();
+                cell.stop();
+                return cell;
+            }
+        }
         cell.initialize();
         if (lifecycle.get() != Lifecycle.OPEN) {
             cell.stop();
@@ -67,6 +89,73 @@ public final class ActorSystem implements AutoCloseable {
 
     public ActorMetrics metrics() {
         return metrics;
+    }
+
+    /** The time source used by actor timers. */
+    public ActorScheduler scheduler() {
+        return scheduler;
+    }
+
+    /** True when no actor is running or holds queued messages. */
+    public boolean isQuiescent() {
+        for (ActorCell<?> cell : actors) {
+            if (!cell.isQuiescent()) return false;
+        }
+        return true;
+    }
+
+    /** Names of the actors that are running or still hold queued messages. */
+    public java.util.List<String> busyActorNames() {
+        java.util.List<String> busy = new java.util.ArrayList<>();
+        for (ActorCell<?> cell : actors) {
+            if (!cell.isQuiescent()) busy.add(cell.describeBusy());
+        }
+        return java.util.List.copyOf(busy);
+    }
+
+    /**
+     * Waits until no actor is running or holds queued messages.
+     *
+     * <p>Quiescence is only meaningful once the callers that were sending have
+     * stopped: a producer may always enqueue more work. It is the deterministic
+     * replacement for polling {@code Thread.sleep} while waiting for actors to
+     * finish, and is also useful for draining before a planned shutdown.</p>
+     *
+     * @return true when the system became quiescent before the deadline
+     */
+    public boolean awaitQuiescent(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        long deadline = saturatingAdd(System.nanoTime(), timeout.toNanos());
+        synchronized (terminationMonitor) {
+            quiescenceWatchers++;
+            try {
+                while (!isQuiescent()) {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0) return false;
+                    try {
+                        terminationMonitor.wait(remaining / 1_000_000L, (int) (remaining % 1_000_000L));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                }
+                return true;
+            } finally {
+                quiescenceWatchers--;
+            }
+        }
+    }
+
+    /**
+     * Wakes {@link #awaitQuiescent(Duration)} waiters after an activation went
+     * idle. The volatile read keeps the cost off the message path when nobody
+     * is waiting, which is the common case.
+     */
+    void notifyPossiblyQuiescent() {
+        if (quiescenceWatchers == 0) return;
+        synchronized (terminationMonitor) {
+            terminationMonitor.notifyAll();
+        }
     }
 
     public int actorCount() {
@@ -82,6 +171,21 @@ public final class ActorSystem implements AutoCloseable {
             executor.submit(cell::runActivation);
         } catch (RejectedExecutionException rejected) {
             cell.terminateFromSystem();
+        }
+    }
+
+    /** Executor used to complete ask replies away from an activation thread. */
+    java.util.concurrent.Executor replyExecutor() {
+        return executor;
+    }
+
+    void deadLetter(ActorRef<?> target, Object message, DeadLetterListener.Reason reason) {
+        DeadLetterListener listener = systemOptions.deadLetterListener();
+        if (listener == null) return;
+        try {
+            listener.onDeadLetter(target, message, reason);
+        } catch (RuntimeException listenerFailure) {
+            // A dead letter listener must never break the send or shutdown path.
         }
     }
 
@@ -128,6 +232,7 @@ public final class ActorSystem implements AutoCloseable {
         if (!executor.isTerminated()) {
             executor.shutdownNow();
         }
+        if (ownsScheduler) scheduler.close();
         lifecycle.set(Lifecycle.CLOSED);
         synchronized (terminationMonitor) {
             terminationMonitor.notifyAll();
@@ -177,21 +282,65 @@ public final class ActorSystem implements AutoCloseable {
         private final M message;
         private final CompletableFuture<Object> reply;
         private final TraceContext traceContext;
+        private final TimerStamp timer;
 
-        private Envelope(M message, CompletableFuture<Object> reply, TraceContext traceContext) {
+        private Envelope(M message, CompletableFuture<Object> reply, TraceContext traceContext,
+                         TimerStamp timer) {
             this.message = message;
             this.reply = reply;
             this.traceContext = traceContext;
+            this.timer = timer;
         }
     }
 
-    private static final class ActorCell<M> implements ManagedActorRef<M> {
+    /** Identifies the timer generation a scheduled message was created for. */
+    private record TimerStamp(Object key, long generation) {
+    }
+
+    /**
+     * One keyed timer. The generation is what makes a replaced or cancelled
+     * timer detectable: a message already on its way carries the generation it
+     * was scheduled with and is dropped when it no longer matches.
+     */
+    private static final class TimerEntry {
+        private final long generation;
+        private final boolean periodic;
+        private volatile ActorScheduler.Cancellable cancellable;
+        private volatile boolean cancelled;
+
+        private TimerEntry(long generation, boolean periodic) {
+            this.generation = generation;
+            this.periodic = periodic;
+        }
+
+        private void attach(ActorScheduler.Cancellable value) {
+            this.cancellable = value;
+            // A cancel that arrived while the task was being scheduled would
+            // have found no cancellable to stop, so re-check here.
+            if (cancelled) value.cancel();
+        }
+
+        private void cancel() {
+            cancelled = true;
+            ActorScheduler.Cancellable current = cancellable;
+            if (current != null) current.cancel();
+        }
+    }
+
+    private static final class ActorCell<M> implements ManagedActorRef<M>, ActorCellView<M> {
+        /** Spins that cover a producer which is a few instructions behind. */
+        private static final int GAP_SPINS = 64;
+        /** Yields that release the carrier so a descheduled producer can run. */
+        private static final int GAP_YIELDS = 16;
+
         private final ActorSystem system;
         private final Supplier<? extends Actor<M>> factory;
         private final ActorOptions options;
         private final String name;
+        private final ActorCell<?> parent;
+        private final Set<ActorCell<?>> children = ConcurrentHashMap.newKeySet();
         private final ActorState state;
-        private volatile MpscChunkedArrayQueue<Envelope<M>> mailbox;
+        private volatile MpscBoundedArrayQueue<Envelope<M>> mailbox;
         private final AtomicBoolean terminationNotified = new AtomicBoolean();
         private volatile Set<TerminationListener> terminationListeners;
         private volatile Actor<M> actor;
@@ -199,13 +348,26 @@ public final class ActorSystem implements AutoCloseable {
         private volatile FailureListener failureListener;
         private volatile Thread activationThread;
         private volatile boolean restartRequested;
+        private Throwable pendingDrainCause;
+        private final ConcurrentHashMap<Object, TimerEntry> timers = new ConcurrentHashMap<>();
+        private final AtomicLong timerGenerations = new AtomicLong();
+        // Message buffers are touched only by the activation that owns the
+        // cell, so they need no synchronisation. They stay null until used: an
+        // ArrayDeque allocates its array eagerly, which a million idle actors
+        // would pay for without ever stashing anything.
+        private java.util.ArrayDeque<Envelope<M>> stash;
+        private java.util.ArrayDeque<Envelope<M>> redeliver;
+        private Envelope<M> currentEnvelope;
+        private boolean currentStashed;
+        private boolean unstashRequested;
 
         private ActorCell(ActorSystem system, Supplier<? extends Actor<M>> factory,
-                          ActorOptions options, String name) {
+                          ActorOptions options, String name, ActorCell<?> parent) {
             this.system = system;
             this.factory = factory;
             this.options = options;
             this.name = name;
+            this.parent = parent;
             this.state = new ActorState(options.mailboxCapacity());
         }
 
@@ -213,11 +375,23 @@ public final class ActorSystem implements AutoCloseable {
             state.initialize();
         }
 
-        private MpscChunkedArrayQueue<Envelope<M>> mailbox() {
-            MpscChunkedArrayQueue<Envelope<M>> current = mailbox;
+        private boolean isQuiescent() {
+            ActorState.Lifecycle life = state.lifecycle();
+            boolean settled = life == ActorState.Lifecycle.IDLE
+                    || life == ActorState.Lifecycle.NEW
+                    || life == ActorState.Lifecycle.TERMINATED;
+            return settled && state.mailboxCount() == 0;
+        }
+
+        private String describeBusy() {
+            return name + "[" + state.lifecycle() + ", mailbox=" + state.mailboxCount() + "]";
+        }
+
+        private MpscBoundedArrayQueue<Envelope<M>> mailbox() {
+            MpscBoundedArrayQueue<Envelope<M>> current = mailbox;
             if (current != null) return current;
             synchronized (this) {
-                if (mailbox == null) mailbox = new MpscChunkedArrayQueue<>();
+                if (mailbox == null) mailbox = new MpscBoundedArrayQueue<>(options.mailboxCapacity());
                 return mailbox;
             }
         }
@@ -242,17 +416,19 @@ public final class ActorSystem implements AutoCloseable {
 
         @Override
         public SendResult send(M message) {
-            return enqueue(message, null);
+            return enqueue(message, null, null);
         }
 
         @Override
-        public java.util.concurrent.CompletionStage<Object> ask(M message, Duration timeout) {
-            Objects.requireNonNull(timeout, "timeout");
-            if (timeout.isNegative() || timeout.isZero()) {
-                throw new IllegalArgumentException("timeout must be positive");
-            }
-            CompletableFuture<Object> future = new CompletableFuture<>();
-            SendResult result = enqueue(message, future);
+        public <R> java.util.concurrent.CompletionStage<R> ask(
+                Duration timeout, java.util.function.Function<ActorRef<R>, M> messageFactory) {
+            Objects.requireNonNull(messageFactory, "messageFactory");
+            requirePositive(timeout);
+            CompletableFuture<R> future = new CompletableFuture<>();
+            ActorRef<R> replyTo = new PromiseRef<>(future, system, name + "-reply");
+            M message = Objects.requireNonNull(messageFactory.apply(replyTo),
+                    "messageFactory returned null");
+            SendResult result = enqueue(message, null, null);
             if (result != SendResult.ACCEPTED && result != SendResult.ACCEPTED_AFTER_DROP) {
                 future.completeExceptionally(new RejectedExecutionException("send rejected: " + result));
             } else {
@@ -262,18 +438,57 @@ public final class ActorSystem implements AutoCloseable {
         }
 
         @Override
+        public <R> java.util.concurrent.CompletionStage<R> ask(
+                Class<R> responseType, Duration timeout,
+                java.util.function.Function<ActorRef<R>, M> messageFactory) {
+            Objects.requireNonNull(responseType, "responseType");
+            return ask(timeout, messageFactory);
+        }
+
+        private static void requirePositive(Duration timeout) {
+            Objects.requireNonNull(timeout, "timeout");
+            if (timeout.isNegative() || timeout.isZero()) {
+                throw new IllegalArgumentException("timeout must be positive");
+            }
+        }
+
+        @Override
+        @SuppressWarnings("removal")
+        public java.util.concurrent.CompletionStage<Object> ask(M message, Duration timeout) {
+            Objects.requireNonNull(timeout, "timeout");
+            if (timeout.isNegative() || timeout.isZero()) {
+                throw new IllegalArgumentException("timeout must be positive");
+            }
+            CompletableFuture<Object> future = new CompletableFuture<>();
+            SendResult result = enqueue(message, future, null);
+            if (result != SendResult.ACCEPTED && result != SendResult.ACCEPTED_AFTER_DROP) {
+                future.completeExceptionally(new RejectedExecutionException("send rejected: " + result));
+            } else {
+                future.orTimeout(timeout.toNanos(), java.util.concurrent.TimeUnit.NANOSECONDS);
+            }
+            return future;
+        }
+
+        @Override
+        @SuppressWarnings("removal")
         public <R> java.util.concurrent.CompletionStage<R> ask(M message, Duration timeout, Class<R> responseType) {
             Objects.requireNonNull(responseType, "responseType");
             return ask(message, timeout).thenApply(responseType::cast);
         }
 
-        private SendResult enqueue(M message, CompletableFuture<Object> reply) {
+        private SendResult enqueue(M message, CompletableFuture<Object> reply, TimerStamp timer) {
             Objects.requireNonNull(message, "message");
-            if (system.isShuttingDown()) return SendResult.SYSTEM_SHUTTING_DOWN;
-            if (system.lifecycle.get() == Lifecycle.CLOSED) return SendResult.SYSTEM_CLOSED;
+            if (system.isShuttingDown()) {
+                system.deadLetter(this, message, DeadLetterListener.Reason.SYSTEM_CLOSED);
+                return SendResult.SYSTEM_SHUTTING_DOWN;
+            }
+            if (system.lifecycle.get() == Lifecycle.CLOSED) {
+                system.deadLetter(this, message, DeadLetterListener.Reason.SYSTEM_CLOSED);
+                return SendResult.SYSTEM_CLOSED;
+            }
             TraceContext trace = ActorContext.CURRENT.isBound()
                     ? ActorContext.CURRENT.get().traceContext() : TraceContext.current();
-            Envelope<M> envelope = new Envelope<>(message, reply, trace);
+            Envelope<M> envelope = new Envelope<>(message, reply, trace, timer);
 
             if (options.overflowStrategy() == MailboxOverflowStrategy.DROP_OLDEST) {
                 synchronized (this) {
@@ -284,25 +499,54 @@ public final class ActorSystem implements AutoCloseable {
             if (reservation == ActorState.EnqueueResult.FULL) {
                 if (options.overflowStrategy() == MailboxOverflowStrategy.DROP_LATEST) {
                     system.metrics.dropped();
+                    system.deadLetter(this, message, DeadLetterListener.Reason.DROPPED);
                     return SendResult.DROPPED;
                 }
                 system.metrics.full();
+                system.deadLetter(this, message, DeadLetterListener.Reason.MAILBOX_FULL);
                 return SendResult.FULL;
             }
-            if (reservation == ActorState.EnqueueResult.TERMINATED) return SendResult.TERMINATED;
-            mailbox().offer(envelope);
+            if (reservation == ActorState.EnqueueResult.TERMINATED) {
+                system.deadLetter(this, message, DeadLetterListener.Reason.TERMINATED);
+                return SendResult.TERMINATED;
+            }
+            if (!publish(envelope, reservation)) {
+                system.metrics.full();
+                system.deadLetter(this, message, DeadLetterListener.Reason.MAILBOX_FULL);
+                return SendResult.FULL;
+            }
             system.metrics.accepted();
-            if (reservation == ActorState.EnqueueResult.SCHEDULE) system.schedule(this);
             return SendResult.ACCEPTED;
+        }
+
+        /**
+         * Publishes a reserved envelope and submits the activation that the
+         * reservation won.
+         *
+         * <p>The ring is sized to the mailbox capacity that {@link ActorState}
+         * already enforces, so a rejected offer is unreachable today. It is
+         * handled so that a future sizing change degrades into backpressure
+         * instead of a silent overwrite.</p>
+         */
+        private boolean publish(Envelope<M> envelope, ActorState.EnqueueResult reservation) {
+            boolean offered = mailbox().offer(envelope);
+            if (!offered) state.releaseMessage();
+            // The reservation may already have claimed the schedule transition.
+            // The activation has to run even with nothing to collect, otherwise
+            // RUNNABLE/scheduled would never be cleared.
+            if (reservation == ActorState.EnqueueResult.SCHEDULE) system.schedule(this);
+            return offered;
         }
 
         private SendResult enqueueWithDropOldest(Envelope<M> envelope) {
             ActorState.EnqueueResult reservation = state.reserveMessage();
             if (reservation == ActorState.EnqueueResult.FULL) {
-                MpscChunkedArrayQueue<Envelope<M>> currentMailbox = mailbox();
+                MpscBoundedArrayQueue<Envelope<M>> currentMailbox = mailbox();
                 Envelope<M> removed = currentMailbox.poll();
                 if (removed == null) {
+                    // Nothing to drop: the head slot is reserved but unpublished.
                     system.metrics.full();
+                    system.deadLetter(this, envelope.message, DeadLetterListener.Reason.MAILBOX_FULL);
                     return SendResult.FULL;
                 }
                 state.releaseMessage();
@@ -310,16 +554,31 @@ public final class ActorSystem implements AutoCloseable {
                 reservation = state.reserveMessage();
                 if (reservation == ActorState.EnqueueResult.FULL) {
                     system.metrics.full();
+                    system.deadLetter(this, envelope.message, DeadLetterListener.Reason.MAILBOX_FULL);
                     return SendResult.FULL;
                 }
-                currentMailbox.offer(envelope);
+                if (reservation == ActorState.EnqueueResult.TERMINATED) {
+                    system.deadLetter(this, envelope.message, DeadLetterListener.Reason.TERMINATED);
+                    return SendResult.TERMINATED;
+                }
+                if (!publish(envelope, reservation)) {
+                    system.metrics.full();
+                    system.deadLetter(this, envelope.message, DeadLetterListener.Reason.MAILBOX_FULL);
+                    return SendResult.FULL;
+                }
                 system.metrics.dropped();
                 return SendResult.ACCEPTED_AFTER_DROP;
             }
-            if (reservation == ActorState.EnqueueResult.TERMINATED) return SendResult.TERMINATED;
-            mailbox().offer(envelope);
+            if (reservation == ActorState.EnqueueResult.TERMINATED) {
+                system.deadLetter(this, envelope.message, DeadLetterListener.Reason.TERMINATED);
+                return SendResult.TERMINATED;
+            }
+            if (!publish(envelope, reservation)) {
+                system.metrics.full();
+                system.deadLetter(this, envelope.message, DeadLetterListener.Reason.MAILBOX_FULL);
+                return SendResult.FULL;
+            }
             system.metrics.accepted();
-            if (reservation == ActorState.EnqueueResult.SCHEDULE) system.schedule(this);
             return SendResult.ACCEPTED;
         }
 
@@ -327,6 +586,162 @@ public final class ActorSystem implements AutoCloseable {
             if (envelope.reply != null) {
                 envelope.reply.completeExceptionally(new RejectedExecutionException("ask message dropped"));
             }
+            system.deadLetter(this, envelope.message, DeadLetterListener.Reason.DROPPED);
+        }
+
+        @Override
+        public void startSingleTimer(Object key, M message, Duration delay) {
+            startTimer(key, message, delay, null);
+        }
+
+        @Override
+        public void startPeriodicTimer(Object key, M message, Duration interval) {
+            startPeriodicTimer(key, message, interval, interval);
+        }
+
+        @Override
+        public void startPeriodicTimer(Object key, M message, Duration initialDelay, Duration interval) {
+            Objects.requireNonNull(interval, "interval");
+            startTimer(key, message, initialDelay, interval);
+        }
+
+        private void startTimer(Object key, M message, Duration delay, Duration interval) {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(message, "message");
+            Objects.requireNonNull(delay, "delay");
+            if (isTerminated() || system.isClosed()) return;
+
+            long generation = timerGenerations.incrementAndGet();
+            TimerEntry entry = new TimerEntry(generation, interval != null);
+            TimerEntry previous = timers.put(key, entry);
+            if (previous != null) previous.cancel();
+
+            ActorScheduler scheduler = system.scheduler();
+            ActorScheduler.Cancellable cancellable = interval == null
+                    ? scheduler.scheduleOnce(delay, () -> fireTimer(key, generation, message))
+                    : scheduler.schedulePeriodically(delay, interval, () -> fireTimer(key, generation, message));
+            entry.attach(cancellable);
+        }
+
+        /** Runs on a scheduler thread; it may only enqueue. */
+        private void fireTimer(Object key, long generation, M message) {
+            TimerEntry entry = timers.get(key);
+            if (entry == null || entry.generation != generation) return;
+            enqueue(message, null, new TimerStamp(key, generation));
+        }
+
+        @Override
+        public boolean isTimerActive(Object key) {
+            return timers.containsKey(Objects.requireNonNull(key, "key"));
+        }
+
+        @Override
+        public boolean cancel(Object key) {
+            TimerEntry removed = timers.remove(Objects.requireNonNull(key, "key"));
+            if (removed == null) return false;
+            removed.cancel();
+            return true;
+        }
+
+        @Override
+        public void cancelAll() {
+            for (Object key : java.util.List.copyOf(timers.keySet())) {
+                cancel(key);
+            }
+        }
+
+        /**
+         * @return false when the message belongs to a timer that was cancelled
+         *         or replaced after it was scheduled
+         */
+        private boolean acceptTimerMessage(TimerStamp stamp) {
+            TimerEntry current = timers.get(stamp.key());
+            if (current == null || current.generation != stamp.generation()) return false;
+            // A single-shot timer owes exactly one message, and it is this one.
+            if (!current.periodic) timers.remove(stamp.key(), current);
+            return true;
+        }
+
+        @Override
+        public <C> ActorRef<C> spawnChild(Supplier<? extends Actor<C>> factory, ActorOptions options) {
+            return system.spawnCell(this, factory, options);
+        }
+
+        @Override
+        public int childCount() {
+            return children.size();
+        }
+
+        @Override
+        public void stashCurrent() {
+            Envelope<M> envelope = currentEnvelope;
+            if (envelope == null) {
+                throw new IllegalStateException("stash() is only valid while handling a message");
+            }
+            if (currentStashed) {
+                throw new IllegalStateException("the current message is already stashed");
+            }
+            int stashed = stash == null ? 0 : stash.size();
+            if (stashed >= options.stashCapacity()) {
+                throw new StashOverflowException("stash is full for " + name
+                        + " at capacity " + options.stashCapacity());
+            }
+            if (stash == null) stash = new java.util.ArrayDeque<>();
+            stash.addLast(envelope);
+            currentStashed = true;
+        }
+
+        @Override
+        public void requestUnstashAll() {
+            unstashRequested = true;
+        }
+
+        @Override
+        public int stashSize() {
+            return stash == null ? 0 : stash.size();
+        }
+
+        /**
+         * Moves stashed messages back in front of the mailbox. They gave up
+         * their mailbox reservation when they were stashed, so each one takes
+         * capacity again here.
+         */
+        private void unstashAllNow() {
+            if (stash == null) return;
+            Envelope<M> stashed;
+            while ((stashed = stash.pollFirst()) != null) {
+                ActorState.EnqueueResult reservation = state.reserveMessage();
+                if (reservation == ActorState.EnqueueResult.FULL) {
+                    system.metrics.full();
+                    completeFailure(stashed, new RejectedExecutionException(
+                            "mailbox full while unstashing: " + name));
+                    system.deadLetter(this, stashed.message, DeadLetterListener.Reason.MAILBOX_FULL);
+                    continue;
+                }
+                if (reservation == ActorState.EnqueueResult.TERMINATED) {
+                    completeFailure(stashed, new CancellationException("actor terminated: " + name));
+                    system.deadLetter(this, stashed.message, DeadLetterListener.Reason.TERMINATED);
+                    continue;
+                }
+                if (redeliver == null) redeliver = new java.util.ArrayDeque<>();
+                redeliver.addLast(stashed);
+            }
+        }
+
+        private void discardBufferedMessages(Throwable cause) {
+            Envelope<M> pending;
+            while (stash != null && (pending = stash.pollFirst()) != null) {
+                completeFailure(pending, cause);
+                system.deadLetter(this, pending.message, DeadLetterListener.Reason.TERMINATED);
+            }
+            while (redeliver != null && (pending = redeliver.pollFirst()) != null) {
+                state.releaseMessageIfPresent();
+                completeFailure(pending, cause);
+                system.deadLetter(this, pending.message, DeadLetterListener.Reason.TERMINATED);
+            }
+            currentEnvelope = null;
+            currentStashed = false;
+            unstashRequested = false;
         }
 
         @Override
@@ -334,29 +749,49 @@ public final class ActorSystem implements AutoCloseable {
 
         @Override
         public void stop() {
-            state.requestStop();
-            CancellationSource source = cancellation;
-            if (source != null) source.cancel();
-            Thread thread = activationThread;
-            if (thread != null) {
-                thread.interrupt();
-            } else {
-                terminateFromSystem();
-            }
+            requestTermination();
         }
 
         @Override
         public void cancel() {
-            state.requestStop();
+            system.metrics.cancellation();
+            requestTermination();
+        }
+
+        /**
+         * Requests termination without assuming that a null activation thread
+         * means no activation is running.
+         *
+         * <p>An activation registers its thread only after {@code tryStart()}
+         * has already moved the cell to {@code RUNNING}. Deciding on the
+         * lifecycle that {@code requestStop()} observed closes that window: a
+         * caller that sees {@code RUNNING} leaves termination to the
+         * activation, which re-reads the lifecycle under this monitor and
+         * terminates the cell itself.</p>
+         */
+        private void requestTermination() {
+            ActorState.Lifecycle previous = state.requestStop();
             CancellationSource source = cancellation;
             if (source != null) source.cancel();
-            system.metrics.cancellation();
-            Thread thread = activationThread;
-            if (thread != null) {
-                thread.interrupt();
-            } else {
-                terminateFromSystem();
+            Thread thread;
+            synchronized (this) {
+                thread = activationThread;
+                if (thread == null && previous != ActorState.Lifecycle.RUNNING) {
+                    terminateFromSystem();
+                    return;
+                }
             }
+            if (thread != null) thread.interrupt();
+        }
+
+        @Override
+        public void suspend() {
+            state.suspend();
+        }
+
+        @Override
+        public void resume() {
+            if (state.resume()) system.schedule(this);
         }
 
         @Override
@@ -385,17 +820,23 @@ public final class ActorSystem implements AutoCloseable {
 
         @Override
         public void restart() {
+            CancellationSource toCancel = null;
+            Thread toInterrupt = null;
             synchronized (this) {
                 if (isTerminated() || system.isClosed() || state.lifecycle() == ActorState.Lifecycle.STOPPING) return;
-                if (activationThread != null) {
+                if (state.lifecycle() == ActorState.Lifecycle.RUNNING) {
+                    // An activation owns the cell, possibly one that has not
+                    // registered its thread yet. It restarts on the way out
+                    // instead of having a second activation submitted here.
                     restartRequested = true;
-                    CancellationSource source = cancellation;
-                    if (source != null) source.cancel();
-                    activationThread.interrupt();
-                    return;
+                    toCancel = cancellation;
+                    toInterrupt = activationThread;
+                } else {
+                    restartNow(false);
                 }
-                restartNow();
             }
+            if (toCancel != null) toCancel.cancel();
+            if (toInterrupt != null) toInterrupt.interrupt();
         }
 
         @Override
@@ -425,27 +866,48 @@ public final class ActorSystem implements AutoCloseable {
             Throwable failure = null;
             try {
                 int processed = 0;
-                while (processed < options.maxBatch() && state.mailboxCount() > 0) {
+                int gapAttempts = 0;
+                while (processed < options.maxBatch()
+                        && state.lifecycle() == ActorState.Lifecycle.RUNNING
+                        && state.mailboxCount() > 0) {
+                    // Re-delivered messages hold mailbox reservations of their
+                    // own, so the count above already accounts for them.
                     activationCancellation.token().throwIfCancelled();
-                    Envelope<M> envelope;
-                    if (options.overflowStrategy() == MailboxOverflowStrategy.DROP_OLDEST) {
-                        synchronized (this) {
-                            envelope = mailbox == null ? null : mailbox.poll();
-                            if (envelope != null) state.releaseMessage();
+                    Envelope<M> envelope = redeliver == null || redeliver.isEmpty()
+                            ? pollMailbox() : takeRedelivered();
+                    if (envelope == null) {
+                        // The mailbox count is non-zero but the head slot has not
+                        // been published: a producer is inside its reservation
+                        // gap. Back off in stages so that a producer which never
+                        // publishes can neither pin this carrier nor defeat a
+                        // shutdown that relies on cancellation and interruption.
+                        if (++gapAttempts <= GAP_SPINS) {
+                            Thread.onSpinWait();
+                        } else if (gapAttempts <= GAP_SPINS + GAP_YIELDS) {
+                            Thread.yield();
+                        } else {
+                            system.metrics.reservationStall();
+                            break;
                         }
-                    } else {
-                        MpscChunkedArrayQueue<Envelope<M>> currentMailbox = mailbox;
-                        envelope = currentMailbox == null ? null : currentMailbox.poll();
-                        if (envelope != null) state.releaseMessage();
+                        continue;
                     }
-                    if (envelope == null) continue;
+                    gapAttempts = 0;
+                    if (envelope.timer != null && !acceptTimerMessage(envelope.timer)) {
+                        // The timer was cancelled or replaced after this message
+                        // was scheduled, so the handler must not see it.
+                        system.deadLetter(this, envelope.message, DeadLetterListener.Reason.DROPPED);
+                        processed++;
+                        continue;
+                    }
                     if (envelope.message instanceof PoisonPill) {
                         if (envelope.reply != null) envelope.reply.complete(null);
                         terminate(new CancellationException("PoisonPill"));
                         return;
                     }
-                    ActorContext context = new ActorContext(this, system, activationCancellation.token(),
-                            envelope.traceContext, envelope.reply);
+                    ActorContext<M> context = new ActorContext<>(this, system,
+                            activationCancellation.token(), envelope.traceContext, envelope.reply);
+                    currentEnvelope = envelope;
+                    currentStashed = false;
                     ActorEvents.MessageEvent event = ActorEvents.beginMessage(name,
                             envelope.message.getClass().getName());
                     boolean success = false;
@@ -454,27 +916,49 @@ public final class ActorSystem implements AutoCloseable {
                         system.metrics.processed();
                         success = true;
                     } catch (CancellationException cancelled) {
-                        completeFailure(envelope, cancelled);
+                        completeReplyOrFail(envelope, context, cancelled);
                         throw cancelled;
                     } catch (Throwable userFailure) {
-                        completeFailure(envelope, userFailure);
+                        completeReplyOrFail(envelope, context, userFailure);
                         throw userFailure;
                     } finally {
                         ActorEvents.endMessage(event, success);
                     }
+                    if (unstashRequested) {
+                        unstashRequested = false;
+                        unstashAllNow();
+                    }
+                    // A stashed message has not been handled yet, so its ask
+                    // future stays open until it is unstashed and processed.
+                    if (!currentStashed) {
+                        // Completed here, outside the ScopedValue binding, so that
+                        // a dependent stage of the ask future cannot observe the
+                        // ActorContext or inherit the TraceContext of this actor.
+                        completeReply(envelope, context);
+                    }
+                    currentEnvelope = null;
                     processed++;
                 }
             } catch (Throwable caught) {
                 failure = caught;
             } finally {
                 boolean restarted = false;
+                Throwable deferredDrain;
                 synchronized (this) {
                     activationThread = null;
-                    if (failure == null && restartRequested && !system.isClosed()
+                    deferredDrain = pendingDrainCause;
+                    pendingDrainCause = null;
+                    if (deferredDrain == null && failure == null && restartRequested && !system.isClosed()
                             && state.lifecycle() != ActorState.Lifecycle.STOPPING) {
-                        restartNow();
+                        restartNow(true);
                         restarted = true;
                     }
+                }
+                if (deferredDrain != null) {
+                    // Another thread terminated this cell while it was running
+                    // and left the mailbox to its owner.
+                    drainMailbox(deferredDrain);
+                    return;
                 }
                 if (restarted) return;
                 if (failure != null) {
@@ -483,8 +967,42 @@ public final class ActorSystem implements AutoCloseable {
                     ActorState.Completion completion = state.completeRun();
                     if (completion == ActorState.Completion.MORE_WORK) system.schedule(this);
                     else if (completion == ActorState.Completion.STOPPING) terminateFromSystem();
+                    else system.notifyPossiblyQuiescent();
                 }
             }
+        }
+
+        private Envelope<M> takeRedelivered() {
+            Envelope<M> envelope = redeliver.pollFirst();
+            if (envelope != null) state.releaseMessage();
+            return envelope;
+        }
+
+        private Envelope<M> pollMailbox() {
+            if (options.overflowStrategy() == MailboxOverflowStrategy.DROP_OLDEST) {
+                synchronized (this) {
+                    Envelope<M> envelope = mailbox == null ? null : mailbox.poll();
+                    if (envelope != null) state.releaseMessage();
+                    return envelope;
+                }
+            }
+            MpscBoundedArrayQueue<Envelope<M>> currentMailbox = mailbox;
+            Envelope<M> envelope = currentMailbox == null ? null : currentMailbox.poll();
+            if (envelope != null) state.releaseMessage();
+            return envelope;
+        }
+
+        private void completeReply(Envelope<M> envelope, ActorContext<M> context) {
+            if (envelope.reply != null && context.replied()) {
+                envelope.reply.complete(context.takeReply());
+            }
+        }
+
+        /** A handler that already answered keeps its answer even if it then fails. */
+        private void completeReplyOrFail(Envelope<M> envelope, ActorContext<M> context, Throwable failure) {
+            if (envelope.reply == null) return;
+            if (context.replied()) envelope.reply.complete(context.takeReply());
+            else completeFailure(envelope, failure);
         }
 
         private void completeFailure(Envelope<M> envelope, Throwable failure) {
@@ -493,7 +1011,7 @@ public final class ActorSystem implements AutoCloseable {
             }
         }
 
-        private void invoke(Envelope<M> envelope, ActorContext context, ReductionBudget budget) throws Exception {
+        private void invoke(Envelope<M> envelope, ActorContext<M> context, ReductionBudget budget) throws Exception {
             java.lang.ScopedValue.where(ActorContext.CURRENT, context)
                     .where(ReductionBudget.CURRENT, budget)
                     .call(() -> {
@@ -502,15 +1020,24 @@ public final class ActorSystem implements AutoCloseable {
                     });
         }
 
-        /** Must be called with this monitor held and no active activation thread. */
-        private void restartNow() {
+        /**
+         * Must be called with this monitor held and no active activation thread.
+         *
+         * @param fromOwner true when the caller is the activation that is
+         *                  leaving the cell, which is still {@code RUNNING}
+         */
+        private void restartNow(boolean fromOwner) {
             try {
+                // A new instance must not inherit timers or deferred messages
+                // armed by the old one.
+                cancelAll();
+                discardBufferedMessages(new CancellationException("actor restarted: " + name));
                 actor = Objects.requireNonNull(factory.get(), "actorFactory returned null");
                 cancellation = new CancellationSource();
                 restartRequested = false;
                 system.metrics.restart();
-                boolean schedule = state.restart();
-                if (schedule) system.schedule(this);
+                ActorState.RestartResult result = fromOwner ? state.restartFromOwner() : state.restart();
+                if (result == ActorState.RestartResult.SCHEDULE) system.schedule(this);
             } catch (Throwable startupFailure) {
                 restartRequested = false;
                 terminate(new ActorCrashedException("Actor restart failed: " + name, startupFailure));
@@ -521,7 +1048,7 @@ public final class ActorSystem implements AutoCloseable {
             system.metrics.failure();
             if (restartRequested && !system.isClosed() && state.lifecycle() != ActorState.Lifecycle.STOPPING) {
                 synchronized (this) {
-                    if (restartRequested) restartNow();
+                    if (restartRequested) restartNow(true);
                 }
                 return;
             }
@@ -537,6 +1064,10 @@ public final class ActorSystem implements AutoCloseable {
             } else {
                 try {
                     listener.onFailure(this, failure);
+                    // The listener may have chosen neither restart nor stop.
+                    // Queued messages must not be stranded in an idle cell that
+                    // has no pending activation.
+                    if (state.scheduleIfIdleWithWork()) system.schedule(this);
                 } catch (Throwable supervisorFailure) {
                     terminate(new ActorCrashedException("Failure listener failed: " + name, supervisorFailure));
                 }
@@ -549,22 +1080,42 @@ public final class ActorSystem implements AutoCloseable {
 
         private void terminate(Throwable cause) {
             Set<TerminationListener> listeners;
+            boolean drainHere;
             synchronized (this) {
                 if (!terminationNotified.compareAndSet(false, true)) return;
                 state.requestStop();
                 state.terminate();
                 listeners = terminationListeners;
+                // Only the thread that owns the activation may consume the
+                // single-consumer mailbox. When another thread terminates a
+                // running cell, its owner drains the mailbox on the way out.
+                drainHere = activationThread == null || activationThread == Thread.currentThread();
+                if (!drainHere) pendingDrainCause = cause;
             }
-            MpscChunkedArrayQueue<Envelope<M>> currentMailbox = mailbox;
-            if (currentMailbox != null) {
-                Envelope<M> pending;
-                while ((pending = currentMailbox.poll()) != null) {
-                    state.releaseMessageIfPresent();
-                    completeFailure(pending, cause);
-                }
+            if (drainHere) drainMailbox(cause);
+            // Stopping a parent stops its subtree. Termination is requested and
+            // not waited for: a child terminates on its own activation, so the
+            // parent must not block a carrier waiting for it.
+            for (ActorCell<?> child : children) {
+                child.stop();
             }
+            children.clear();
+            if (parent != null) parent.children.remove(this);
             system.remove(this);
             if (listeners != null) listeners.forEach(listener -> listener.onTerminated(this));
+        }
+
+        private void drainMailbox(Throwable cause) {
+            cancelAll();
+            discardBufferedMessages(cause);
+            MpscBoundedArrayQueue<Envelope<M>> currentMailbox = mailbox;
+            if (currentMailbox == null) return;
+            Envelope<M> pending;
+            while ((pending = currentMailbox.poll()) != null) {
+                state.releaseMessageIfPresent();
+                completeFailure(pending, cause);
+                system.deadLetter(this, pending.message, DeadLetterListener.Reason.TERMINATED);
+            }
         }
     }
 }

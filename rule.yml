@@ -19,12 +19,28 @@ rules:
     level: error
     desc:
       - "A mailbox drain must be protected by a successful packed-state transition"
+  - id: mailbox-single-consumer
+    name: "mailbox-has-one-consumer"
+    apply: "actor-core/src/main/java/**"
+    level: error
+    desc:
+      - "Only the activation that owns a cell may poll its mailbox"
+      - "Ownership is decided by the packed lifecycle, never by the registered activation thread"
+      - "A terminal drain requested by another thread is deferred to the owning activation"
+  - id: bounded-queue-wait
+    name: "queue-never-blocks-the-consumer"
+    apply: "actor-core/src/main/java/com/example/queue/**"
+    level: error
+    desc:
+      - "poll must report an unpublished reservation instead of waiting for it"
+      - "The wait policy belongs to the activation loop so that cancellation and shutdown stay effective"
   - id: no-message-allocation
     name: "queue-steady-state-allocation"
     apply: "actor-core/src/main/java/com/example/queue/**"
     level: error
     desc:
-      - "Queue offer and poll must not allocate per message after chunks are allocated"
+      - "Queue offer and poll must not allocate per message"
+      - "Queue storage is allocated once and must not grow with the number of messages carried"
   - id: bounded-production-http
     name: "http-request-safety"
     apply: "actor-http/src/main/java/**"

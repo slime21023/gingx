@@ -58,15 +58,18 @@ ActorSystemOptions systemOptions = ActorSystemOptions.builder()
     .shutdownTimeout(Duration.ofSeconds(30))
     .build();
 
+record Echo(String value, ActorRef<String> replyTo) {}
+
 try (ActorSystem system = new ActorSystem(systemOptions)) {
-    ActorRef<String> actor = system.spawn(() -> new Actor<>() {
+    ActorRef<Echo> actor = system.spawn(() -> new Actor<Echo>() {
         @Override
-        protected void onMessage(String message, ActorContext context) {
-            context.reply(message.toUpperCase());
+        protected void onMessage(Echo message, ActorContext<Echo> context) {
+            message.replyTo().send(message.value().toUpperCase());
         }
     });
 
-    CompletionStage<String> result = actor.ask("hello", Duration.ofSeconds(2), String.class);
+    CompletionStage<String> result =
+            actor.ask(Duration.ofSeconds(2), replyTo -> new Echo("hello", replyTo));
 }
 ~~~
 
@@ -85,11 +88,27 @@ then terminates the target actor. Supervision restarts preserve queued messages
 and drop the in-flight message. Crash-loop limits stop the affected supervisor
 subtree.
 
+ActorContext carries the actor message type, so an actor can send to itself. It
+also provides keyed timers, message stashing and child actors whose lifetime is
+contained in the parent. See the guides for the semantics of each.
+
+## When you do not need this library
+
+The virtual-thread execution model that makes this runtime cheap is available
+to any Java 25 program. A bounded queue drained by one virtual thread per actor
+is about thirty lines and gives single-threaded processing with backpressure.
+
+This library earns its place when you have many actors rather than a few (idle
+actors hold no thread and allocate no mailbox), when you need a supervision
+tree, or when you need the cancellation, shutdown, dead letter and JFR
+contracts. For a handful of long-lived components, plain Java is simpler.
+
 ## Modules
 
-- actor-core: VarHandle MPSC queue, packed actor state, virtual-thread
+- actor-core: VarHandle bounded MPSC ring, packed actor state, virtual-thread
   runtime, lazy mailbox allocation, cancellation, ScopedValue context,
-  counters, JFR message events, typed lifecycle options and graceful shutdown.
+  counters, dead letters, JFR message events, typed lifecycle options and
+  graceful shutdown.
 - actor-groovy: Groovy 5 << / ask DSL, GINQ snapshot queries and the
   @Preemptive local AST transformation. It is an optional JVM extension.
 - actor-supervision: OneForOne, OneForAll and RestForOne policies, nested
@@ -98,6 +117,8 @@ subtree.
   deadlines, optional TLS and graceful close.
 - actor-http-jackson: optional Jackson request/response JSON adapter.
 - actor-observability-micrometer: optional Micrometer bridge for core counters.
+- actor-testkit: TestProbe, virtual-time TestScheduler and quiescence waits.
+  It is a test-scoped dependency and depends only on the core.
 - actor-tck: runtime contract, fault-injection and lifecycle tests.
 - actor-demo: Java-only HTTP demo and Native Image compatibility metadata.
 - actor-benchmarks / actor-stress: JMH and opt-in concurrency/memory gates.
