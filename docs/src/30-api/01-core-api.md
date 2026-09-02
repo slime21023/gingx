@@ -68,8 +68,12 @@ void removeTerminationListener(TerminationListener listener);
 ```
 
 `send` 不代表 handler 已執行，只代表訊息在當下被接受、丟棄或拒絕。`ask`
-回傳 `CompletionStage`，handler 以 `context.reply(value)` 完成回覆；timeout、
+回傳 `CompletionStage`，handler 以 `context.reply(value)` 記錄回覆；timeout、
 overflow、actor failure 或 shutdown 都應由呼叫端處理。
+
+Future 在 handler 返回之後才完成，而不是在 `reply()` 當下。掛在其上的
+dependent stage 會在 actor 的 activation thread 上執行，但已離開該 actor 的
+`ScopedValue` binding；若 stage 的工作不輕量，應自行指定 executor。
 
 Groovy 可使用 `ref << message`；Java 仍建議直接使用 `send`，因為它會回傳
 明確的 `SendResult`。
@@ -98,7 +102,7 @@ Groovy 可使用 `ref << message`；Java 仍建議直接使用 `send`，因為�
 | `system()` | 所屬 `ActorSystem` |
 | `cancellation()` | activation 的取消 token |
 | `traceContext()` | 目前訊息攜帶的 trace context |
-| `reply(value)` | 完成目前 `ask`；對 `send` 訊息呼叫會丟 `IllegalStateException` |
+| `reply(value)` | 記錄目前 `ask` 的回覆，handler 返回後由 runtime 完成；對 `send` 訊息呼叫會丟 `IllegalStateException` |
 | `ActorContext.current()` | 由 `ScopedValue` 取得目前 context |
 
 不要把 context 保存到 actor state 或跨執行緒延後使用；需要的值應在 handler

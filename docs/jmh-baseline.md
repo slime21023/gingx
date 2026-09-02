@@ -1,5 +1,10 @@
 # JMH baseline
 
+> **這份數據已作廢，必須重新量測。** 它是以先前的 chunked linked-list queue
+> 取得的；該 queue 已被定容 ring `MpscBoundedArrayQueue` 取代。語意也隨之
+> 改變：`offer` 現在會在滿載時回傳 false 形成背壓，而不是無界成長。發布
+> gate 前必須用新實作重跑並更新下表。
+
 測試環境：Microsoft OpenJDK 25.0.4.1、Windows x86-64。以下是
 `1.0.0-SNAPSHOT` release candidate 的可重現基準；正式發布前仍須在固定
 CPU、JDK、OS 與 JMH 參數的 dedicated runner 重跑並保存 raw output。

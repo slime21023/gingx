@@ -6,6 +6,11 @@ import java.util.function.Supplier;
 public interface ManagedActorRef<M> extends ActorRef<M> {
     void restart();
 
+    /** Keeps queued messages but stops activations from running until resumed. */
+    void suspend();
+
+    void resume();
+
     void setFailureListener(FailureListener listener);
 
     void addTerminationListener(TerminationListener listener);

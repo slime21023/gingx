@@ -87,9 +87,10 @@ subtree.
 
 ## Modules
 
-- actor-core: VarHandle MPSC queue, packed actor state, virtual-thread
+- actor-core: VarHandle bounded MPSC ring, packed actor state, virtual-thread
   runtime, lazy mailbox allocation, cancellation, ScopedValue context,
-  counters, JFR message events, typed lifecycle options and graceful shutdown.
+  counters, dead letters, JFR message events, typed lifecycle options and
+  graceful shutdown.
 - actor-groovy: Groovy 5 << / ask DSL, GINQ snapshot queries and the
   @Preemptive local AST transformation. It is an optional JVM extension.
 - actor-supervision: OneForOne, OneForAll and RestForOne policies, nested

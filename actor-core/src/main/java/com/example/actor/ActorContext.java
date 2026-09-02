@@ -11,6 +11,8 @@ public final class ActorContext {
     private final CancellationToken cancellation;
     private final TraceContext traceContext;
     private final CompletableFuture<Object> reply;
+    private Object replyValue;
+    private boolean replied;
 
     ActorContext(ActorRef<?> self, ActorSystem system, CancellationToken cancellation,
                  TraceContext traceContext, CompletableFuture<Object> reply) {
@@ -30,10 +32,31 @@ public final class ActorContext {
     public CancellationToken cancellation() { return cancellation; }
     public TraceContext traceContext() { return traceContext; }
 
+    /**
+     * Records the answer to the current ask request.
+     *
+     * <p>The future is completed by the runtime once the handler returns, not
+     * here. Completing it inside the handler would run the caller's dependent
+     * stages while this actor's {@link ActorContext} and {@link TraceContext}
+     * are still bound, so a stage that sent a message would inherit this
+     * actor's trace.</p>
+     */
     public void reply(Object value) {
         if (reply == null) {
             throw new IllegalStateException("The current message is not an ask request");
         }
-        reply.complete(value);
+        this.replyValue = value;
+        this.replied = true;
+    }
+
+    boolean replied() {
+        return replied;
+    }
+
+    Object takeReply() {
+        Object value = replyValue;
+        replyValue = null;
+        replied = false;
+        return value;
     }
 }

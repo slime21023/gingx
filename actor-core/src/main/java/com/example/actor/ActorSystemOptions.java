@@ -7,10 +7,12 @@ import java.util.Objects;
 public final class ActorSystemOptions {
     private final ActorOptions defaultActorOptions;
     private final Duration shutdownTimeout;
+    private final DeadLetterListener deadLetterListener;
 
     private ActorSystemOptions(Builder builder) {
         this.defaultActorOptions = builder.defaultActorOptions;
         this.shutdownTimeout = builder.shutdownTimeout;
+        this.deadLetterListener = builder.deadLetterListener;
     }
 
     public static Builder builder() {
@@ -29,9 +31,15 @@ public final class ActorSystemOptions {
         return shutdownTimeout;
     }
 
+    /** @return the dead letter listener, or null when undelivered messages are only counted */
+    public DeadLetterListener deadLetterListener() {
+        return deadLetterListener;
+    }
+
     public static final class Builder {
         private ActorOptions defaultActorOptions = ActorOptions.defaults();
         private Duration shutdownTimeout = Duration.ofSeconds(30);
+        private DeadLetterListener deadLetterListener;
 
         public Builder defaultActorOptions(ActorOptions options) {
             this.defaultActorOptions = Objects.requireNonNull(options, "defaultActorOptions");
@@ -44,6 +52,12 @@ public final class ActorSystemOptions {
                 throw new IllegalArgumentException("shutdownTimeout must be positive");
             }
             this.shutdownTimeout = timeout;
+            return this;
+        }
+
+        /** Passing null keeps the default of counting undelivered messages only. */
+        public Builder deadLetterListener(DeadLetterListener listener) {
+            this.deadLetterListener = listener;
             return this;
         }
 

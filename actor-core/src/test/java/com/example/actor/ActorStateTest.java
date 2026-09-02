@@ -28,9 +28,56 @@ class ActorStateTest {
         state.reserveMessage();
         state.cancel();
         state.fail();
-        assertTrue(state.restart());
+        assertEquals(ActorState.RestartResult.SCHEDULE, state.restart());
         assertFalse(state.isCancelled());
         assertEquals(1, state.mailboxCount());
         assertEquals(ActorState.Lifecycle.RUNNABLE, state.lifecycle());
+    }
+
+    @Test
+    void restartIsRefusedWhileAnActivationOwnsTheCell() {
+        ActorState state = new ActorState(4);
+        state.initialize();
+        state.reserveMessage();
+        assertTrue(state.tryStart());
+        assertEquals(ActorState.Lifecycle.RUNNING, state.lifecycle());
+        assertEquals(ActorState.RestartResult.REFUSED, state.restart(),
+                "a running activation must observe the restart itself");
+        assertEquals(ActorState.Lifecycle.RUNNING, state.lifecycle());
+    }
+
+    @Test
+    void requestStopReportsTheLifecycleItObserved() {
+        ActorState state = new ActorState(4);
+        state.initialize();
+        state.reserveMessage();
+        assertTrue(state.tryStart());
+        assertEquals(ActorState.Lifecycle.RUNNING, state.requestStop());
+        assertEquals(ActorState.Lifecycle.STOPPING, state.requestStop());
+    }
+
+    @Test
+    void idleCellWithQueuedMessagesCanBeReArmed() {
+        ActorState state = new ActorState(4);
+        state.initialize();
+        state.reserveMessage();
+        assertTrue(state.tryStart());
+        state.fail();
+        assertEquals(ActorState.Lifecycle.IDLE, state.lifecycle());
+        assertEquals(1, state.mailboxCount());
+        assertTrue(state.scheduleIfIdleWithWork());
+        assertEquals(ActorState.Lifecycle.RUNNABLE, state.lifecycle());
+        assertFalse(state.scheduleIfIdleWithWork(), "re-arming must be idempotent");
+    }
+
+    @Test
+    void suspendedCellDoesNotStartUntilResumed() {
+        ActorState state = new ActorState(4);
+        state.initialize();
+        assertEquals(ActorState.EnqueueResult.SCHEDULE, state.reserveMessage());
+        state.suspend();
+        assertFalse(state.tryStart(), "a suspended cell must not run");
+        assertTrue(state.resume(), "resume must resubmit the activation it swallowed");
+        assertTrue(state.tryStart());
     }
 }
