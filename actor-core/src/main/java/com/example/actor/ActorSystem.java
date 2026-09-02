@@ -261,15 +261,52 @@ public final class ActorSystem implements AutoCloseable {
         private final M message;
         private final CompletableFuture<Object> reply;
         private final TraceContext traceContext;
+        private final TimerStamp timer;
 
-        private Envelope(M message, CompletableFuture<Object> reply, TraceContext traceContext) {
+        private Envelope(M message, CompletableFuture<Object> reply, TraceContext traceContext,
+                         TimerStamp timer) {
             this.message = message;
             this.reply = reply;
             this.traceContext = traceContext;
+            this.timer = timer;
         }
     }
 
-    private static final class ActorCell<M> implements ManagedActorRef<M> {
+    /** Identifies the timer generation a scheduled message was created for. */
+    private record TimerStamp(Object key, long generation) {
+    }
+
+    /**
+     * One keyed timer. The generation is what makes a replaced or cancelled
+     * timer detectable: a message already on its way carries the generation it
+     * was scheduled with and is dropped when it no longer matches.
+     */
+    private static final class TimerEntry {
+        private final long generation;
+        private final boolean periodic;
+        private volatile ActorScheduler.Cancellable cancellable;
+        private volatile boolean cancelled;
+
+        private TimerEntry(long generation, boolean periodic) {
+            this.generation = generation;
+            this.periodic = periodic;
+        }
+
+        private void attach(ActorScheduler.Cancellable value) {
+            this.cancellable = value;
+            // A cancel that arrived while the task was being scheduled would
+            // have found no cancellable to stop, so re-check here.
+            if (cancelled) value.cancel();
+        }
+
+        private void cancel() {
+            cancelled = true;
+            ActorScheduler.Cancellable current = cancellable;
+            if (current != null) current.cancel();
+        }
+    }
+
+    private static final class ActorCell<M> implements ManagedActorRef<M>, Timers<M> {
         /** Spins that cover a producer which is a few instructions behind. */
         private static final int GAP_SPINS = 64;
         /** Yields that release the carrier so a descheduled producer can run. */
@@ -289,6 +326,8 @@ public final class ActorSystem implements AutoCloseable {
         private volatile Thread activationThread;
         private volatile boolean restartRequested;
         private Throwable pendingDrainCause;
+        private final ConcurrentHashMap<Object, TimerEntry> timers = new ConcurrentHashMap<>();
+        private final AtomicLong timerGenerations = new AtomicLong();
 
         private ActorCell(ActorSystem system, Supplier<? extends Actor<M>> factory,
                           ActorOptions options, String name) {
@@ -344,7 +383,7 @@ public final class ActorSystem implements AutoCloseable {
 
         @Override
         public SendResult send(M message) {
-            return enqueue(message, null);
+            return enqueue(message, null, null);
         }
 
         @Override
@@ -354,7 +393,7 @@ public final class ActorSystem implements AutoCloseable {
                 throw new IllegalArgumentException("timeout must be positive");
             }
             CompletableFuture<Object> future = new CompletableFuture<>();
-            SendResult result = enqueue(message, future);
+            SendResult result = enqueue(message, future, null);
             if (result != SendResult.ACCEPTED && result != SendResult.ACCEPTED_AFTER_DROP) {
                 future.completeExceptionally(new RejectedExecutionException("send rejected: " + result));
             } else {
@@ -369,7 +408,7 @@ public final class ActorSystem implements AutoCloseable {
             return ask(message, timeout).thenApply(responseType::cast);
         }
 
-        private SendResult enqueue(M message, CompletableFuture<Object> reply) {
+        private SendResult enqueue(M message, CompletableFuture<Object> reply, TimerStamp timer) {
             Objects.requireNonNull(message, "message");
             if (system.isShuttingDown()) {
                 system.deadLetter(this, message, DeadLetterListener.Reason.SYSTEM_CLOSED);
@@ -381,7 +420,7 @@ public final class ActorSystem implements AutoCloseable {
             }
             TraceContext trace = ActorContext.CURRENT.isBound()
                     ? ActorContext.CURRENT.get().traceContext() : TraceContext.current();
-            Envelope<M> envelope = new Envelope<>(message, reply, trace);
+            Envelope<M> envelope = new Envelope<>(message, reply, trace, timer);
 
             if (options.overflowStrategy() == MailboxOverflowStrategy.DROP_OLDEST) {
                 synchronized (this) {
@@ -480,6 +519,79 @@ public final class ActorSystem implements AutoCloseable {
                 envelope.reply.completeExceptionally(new RejectedExecutionException("ask message dropped"));
             }
             system.deadLetter(this, envelope.message, DeadLetterListener.Reason.DROPPED);
+        }
+
+        @Override
+        public void startSingleTimer(Object key, M message, Duration delay) {
+            startTimer(key, message, delay, null);
+        }
+
+        @Override
+        public void startPeriodicTimer(Object key, M message, Duration interval) {
+            startPeriodicTimer(key, message, interval, interval);
+        }
+
+        @Override
+        public void startPeriodicTimer(Object key, M message, Duration initialDelay, Duration interval) {
+            Objects.requireNonNull(interval, "interval");
+            startTimer(key, message, initialDelay, interval);
+        }
+
+        private void startTimer(Object key, M message, Duration delay, Duration interval) {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(message, "message");
+            Objects.requireNonNull(delay, "delay");
+            if (isTerminated() || system.isClosed()) return;
+
+            long generation = timerGenerations.incrementAndGet();
+            TimerEntry entry = new TimerEntry(generation, interval != null);
+            TimerEntry previous = timers.put(key, entry);
+            if (previous != null) previous.cancel();
+
+            ActorScheduler scheduler = system.scheduler();
+            ActorScheduler.Cancellable cancellable = interval == null
+                    ? scheduler.scheduleOnce(delay, () -> fireTimer(key, generation, message))
+                    : scheduler.schedulePeriodically(delay, interval, () -> fireTimer(key, generation, message));
+            entry.attach(cancellable);
+        }
+
+        /** Runs on a scheduler thread; it may only enqueue. */
+        private void fireTimer(Object key, long generation, M message) {
+            TimerEntry entry = timers.get(key);
+            if (entry == null || entry.generation != generation) return;
+            enqueue(message, null, new TimerStamp(key, generation));
+        }
+
+        @Override
+        public boolean isTimerActive(Object key) {
+            return timers.containsKey(Objects.requireNonNull(key, "key"));
+        }
+
+        @Override
+        public boolean cancel(Object key) {
+            TimerEntry removed = timers.remove(Objects.requireNonNull(key, "key"));
+            if (removed == null) return false;
+            removed.cancel();
+            return true;
+        }
+
+        @Override
+        public void cancelAll() {
+            for (Object key : java.util.List.copyOf(timers.keySet())) {
+                cancel(key);
+            }
+        }
+
+        /**
+         * @return false when the message belongs to a timer that was cancelled
+         *         or replaced after it was scheduled
+         */
+        private boolean acceptTimerMessage(TimerStamp stamp) {
+            TimerEntry current = timers.get(stamp.key());
+            if (current == null || current.generation != stamp.generation()) return false;
+            // A single-shot timer owes exactly one message, and it is this one.
+            if (!current.periodic) timers.remove(stamp.key(), current);
+            return true;
         }
 
         @Override
@@ -627,13 +739,20 @@ public final class ActorSystem implements AutoCloseable {
                         continue;
                     }
                     gapAttempts = 0;
+                    if (envelope.timer != null && !acceptTimerMessage(envelope.timer)) {
+                        // The timer was cancelled or replaced after this message
+                        // was scheduled, so the handler must not see it.
+                        system.deadLetter(this, envelope.message, DeadLetterListener.Reason.DROPPED);
+                        processed++;
+                        continue;
+                    }
                     if (envelope.message instanceof PoisonPill) {
                         if (envelope.reply != null) envelope.reply.complete(null);
                         terminate(new CancellationException("PoisonPill"));
                         return;
                     }
-                    ActorContext<M> context = new ActorContext<>(this, system, activationCancellation.token(),
-                            envelope.traceContext, envelope.reply);
+                    ActorContext<M> context = new ActorContext<>(this, this, system,
+                            activationCancellation.token(), envelope.traceContext, envelope.reply);
                     ActorEvents.MessageEvent event = ActorEvents.beginMessage(name,
                             envelope.message.getClass().getName());
                     boolean success = false;
@@ -739,6 +858,8 @@ public final class ActorSystem implements AutoCloseable {
          */
         private void restartNow(boolean fromOwner) {
             try {
+                // A new instance must not inherit timers armed by the old one.
+                cancelAll();
                 actor = Objects.requireNonNull(factory.get(), "actorFactory returned null");
                 cancellation = new CancellationSource();
                 restartRequested = false;
@@ -805,6 +926,7 @@ public final class ActorSystem implements AutoCloseable {
         }
 
         private void drainMailbox(Throwable cause) {
+            cancelAll();
             MpscBoundedArrayQueue<Envelope<M>> currentMailbox = mailbox;
             if (currentMailbox == null) return;
             Envelope<M> pending;

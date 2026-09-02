@@ -13,6 +13,7 @@ public final class ActorContext<M> {
     public static final java.lang.ScopedValue<ActorContext<?>> CURRENT = java.lang.ScopedValue.newInstance();
 
     private final ActorRef<M> self;
+    private final Timers<M> timers;
     private final ActorSystem system;
     private final CancellationToken cancellation;
     private final TraceContext traceContext;
@@ -20,9 +21,10 @@ public final class ActorContext<M> {
     private Object replyValue;
     private boolean replied;
 
-    ActorContext(ActorRef<M> self, ActorSystem system, CancellationToken cancellation,
+    ActorContext(ActorRef<M> self, Timers<M> timers, ActorSystem system, CancellationToken cancellation,
                  TraceContext traceContext, CompletableFuture<Object> reply) {
         this.self = Objects.requireNonNull(self, "self");
+        this.timers = Objects.requireNonNull(timers, "timers");
         this.system = Objects.requireNonNull(system, "system");
         this.cancellation = Objects.requireNonNull(cancellation, "cancellation");
         this.traceContext = Objects.requireNonNull(traceContext, "traceContext");
@@ -35,6 +37,9 @@ public final class ActorContext<M> {
 
     /** The typed reference of the actor currently handling a message. */
     public ActorRef<M> self() { return self; }
+    /** Keyed timers for this actor; see {@link Timers}. */
+    public Timers<M> timers() { return timers; }
+
     public ActorSystem system() { return system; }
     public CancellationToken cancellation() { return cancellation; }
     public TraceContext traceContext() { return traceContext; }
