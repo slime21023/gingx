@@ -2,5 +2,13 @@
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
           xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
-    <localRepository>C:\Side\gingx\.m2-local</localRepository>
+    <!--
+      No localRepository is set on purpose. It used to name an absolute Windows
+      path, which left the Linux half of the CI matrix without a usable local
+      repository and defeated the setup-java dependency cache. The default
+      (~/.m2/repository) is what the cache and every other tool expect.
+
+      To use a different local repository, pass -Dmaven.repo.local=<path>
+      instead of pinning one here, so the choice stays per-machine.
+    -->
 </settings>
