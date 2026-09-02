@@ -24,7 +24,7 @@ class MillionActorMemoryTest {
             for (int i = 0; i < 1_000_000; i++) {
                 references.add(system.spawn(() -> new Actor<Object>() {
                     @Override
-                    protected void onMessage(Object message, com.example.actor.ActorContext context) {
+                    protected void onMessage(Object message, com.example.actor.ActorContext<Object> context) {
                     }
                 }));
             }

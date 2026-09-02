@@ -26,7 +26,7 @@ class ActorRuntimeTckTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Object> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Object message, com.example.actor.ActorContext context) {
+                protected void onMessage(Object message, com.example.actor.ActorContext<Object> context) {
                     if (message instanceof Integer value) received.add(value);
                 }
             }, ActorOptions.builder().mailboxCapacity(16).build());
@@ -44,7 +44,7 @@ class ActorRuntimeTckTest {
         try (ActorSystem system = new ActorSystem(ActorSystemOptionsForTest.options())) {
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, com.example.actor.ActorContext context) throws Exception {
+                protected void onMessage(String message, com.example.actor.ActorContext<String> context) throws Exception {
                     entered.countDown();
                     try {
                         new CountDownLatch(1).await();
@@ -80,7 +80,7 @@ class ActorRuntimeTckTest {
             ActorRef<Integer> ref = supervisor.spawn(new com.example.actor.supervisor.ChildSpec<>(
                     "random", () -> new Actor<>() {
                         @Override
-                        protected void onMessage(Integer message, com.example.actor.ActorContext context) {
+                        protected void onMessage(Integer message, com.example.actor.ActorContext<Integer> context) {
                             if (delivered.add(message) && injectedFailures.contains(message)
                                     && failedOnce.add(message)) {
                                 throw new IllegalStateException("injected");

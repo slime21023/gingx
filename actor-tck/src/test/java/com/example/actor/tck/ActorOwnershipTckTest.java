@@ -44,7 +44,7 @@ class ActorOwnershipTckTest {
         try (ActorSystem system = new ActorSystem(options)) {
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                     delivered.countDown();
                 }
             }, ActorOptions.builder().mailboxCapacity(16).build());
@@ -87,7 +87,7 @@ class ActorOwnershipTckTest {
         try (ActorSystem system = new ActorSystem()) {
             ManagedActorRef<Integer> ref = system.spawnManaged(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Integer message, ActorContext context) {
+                protected void onMessage(Integer message, ActorContext<Integer> context) {
                     if (!insideHandler.compareAndSet(false, true)) {
                         overlapped.set(true);
                     }
@@ -124,7 +124,7 @@ class ActorOwnershipTckTest {
             try (ActorSystem system = new ActorSystem()) {
                 ActorRef<Integer> ref = system.spawn(() -> new Actor<>() {
                     @Override
-                    protected void onMessage(Integer message, ActorContext context) {
+                    protected void onMessage(Integer message, ActorContext<Integer> context) {
                         if (!insideHandler.compareAndSet(false, true)) overlapped.set(true);
                         insideHandler.set(false);
                     }
@@ -151,7 +151,7 @@ class ActorOwnershipTckTest {
         try (ActorSystem system = new ActorSystem(options)) {
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, ActorContext context) throws Exception {
+                protected void onMessage(String message, ActorContext<String> context) throws Exception {
                     entered.countDown();
                     release.await();
                 }
@@ -175,7 +175,7 @@ class ActorOwnershipTckTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                     context.reply(message.toUpperCase());
                 }
             }, ActorOptions.defaults());

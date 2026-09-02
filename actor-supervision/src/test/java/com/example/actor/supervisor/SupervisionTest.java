@@ -42,7 +42,7 @@ class SupervisionTest {
                 private final int instance = instances.incrementAndGet();
 
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                     if (message.equals("fail") && instance == 1) {
                         throw new IllegalStateException("expected");
                     }
@@ -70,7 +70,7 @@ class SupervisionTest {
                 private final int instance = firstInstances.incrementAndGet();
 
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                     if (message.equals("fail") && instance == 1) {
                         throw new IllegalStateException("expected");
                     }
@@ -80,7 +80,7 @@ class SupervisionTest {
                 private final int instance = secondInstances.incrementAndGet();
 
                 @Override
-                protected void onMessage(String message, ActorContext context) throws Exception {
+                protected void onMessage(String message, ActorContext<String> context) throws Exception {
                     if (message.equals("hold")) {
                         siblingStarted.countDown();
                         try {
@@ -112,13 +112,13 @@ class SupervisionTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Terminated> observer = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Terminated message, ActorContext context) {
+                protected void onMessage(Terminated message, ActorContext<Terminated> context) {
                     terminated.complete(message);
                 }
             }, ActorOptions.defaults());
             ActorRef<String> target = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                 }
             }, ActorOptions.defaults());
             DeathWatch watch = new DeathWatch();
@@ -140,7 +140,7 @@ class SupervisionTest {
                 private final int instance = firstInstances.incrementAndGet();
 
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                     if (message.equals("fail") && instance == 1) throw new IllegalStateException("expected");
                 }
             }, ActorOptions.defaults()));
@@ -148,14 +148,14 @@ class SupervisionTest {
                 private final int ignored = secondInstances.incrementAndGet();
 
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                 }
             }, ActorOptions.defaults()));
             ActorRef<String> third = supervisor.spawn(new ChildSpec<>("third", () -> new Actor<String>() {
                 private final int ignored = thirdInstances.incrementAndGet();
 
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                 }
             }, ActorOptions.defaults()));
             second.send("init");
@@ -182,7 +182,7 @@ class SupervisionTest {
                 private final int ignored = instances.incrementAndGet();
 
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                     throw new IllegalStateException("injected");
                 }
             }, ActorOptions.defaults()));

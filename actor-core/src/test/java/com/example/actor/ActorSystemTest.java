@@ -19,7 +19,7 @@ class ActorSystemTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Integer> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Integer message, ActorContext context) {
+                protected void onMessage(Integer message, ActorContext<Integer> context) {
                     int now = active.incrementAndGet();
                     maximum.accumulateAndGet(now, Math::max);
                     if (message == 5) processed.complete(null);
@@ -40,7 +40,7 @@ class ActorSystemTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                     context.reply(message.toUpperCase());
                 }
             }, ActorOptions.defaults());
@@ -55,7 +55,7 @@ class ActorSystemTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Integer> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Integer message, ActorContext context) throws Exception {
+                protected void onMessage(Integer message, ActorContext<Integer> context) throws Exception {
                     release.get(5, TimeUnit.SECONDS);
                 }
             }, ActorOptions.builder().mailboxCapacity(1).build());
@@ -73,7 +73,7 @@ class ActorSystemTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Integer> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Integer message, ActorContext context) throws Exception {
+                protected void onMessage(Integer message, ActorContext<Integer> context) throws Exception {
                     if (message == 1) {
                         started.countDown();
                         release.get(5, TimeUnit.SECONDS);
@@ -99,7 +99,7 @@ class ActorSystemTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Integer> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Integer message, ActorContext context) throws Exception {
+                protected void onMessage(Integer message, ActorContext<Integer> context) throws Exception {
                     if (message == 1) {
                         started.countDown();
                         release.get(5, TimeUnit.SECONDS);
@@ -124,7 +124,7 @@ class ActorSystemTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Integer> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Integer message, ActorContext context) {
+                protected void onMessage(Integer message, ActorContext<Integer> context) {
                     entered.complete(null);
                     while (true) {
                         ReductionBudget.tickCurrent();
@@ -144,7 +144,7 @@ class ActorSystemTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Integer> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(Integer message, ActorContext context) {
+                protected void onMessage(Integer message, ActorContext<Integer> context) {
                 }
             }, ActorOptions.defaults());
             ref.cancel();
@@ -159,7 +159,7 @@ class ActorSystemTest {
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<String> ref = system.spawn(() -> new Actor<>() {
                 @Override
-                protected void onMessage(String message, ActorContext context) {
+                protected void onMessage(String message, ActorContext<String> context) {
                     observed.complete(context.traceContext());
                 }
             }, ActorOptions.defaults());

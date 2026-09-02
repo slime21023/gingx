@@ -18,7 +18,7 @@ public final class DemoApplication {
         ActorSystem system = new ActorSystem();
         ActorRef<String> echo = system.spawn(() -> new Actor<>() {
             @Override
-            protected void onMessage(String message, com.example.actor.ActorContext context) {
+            protected void onMessage(String message, com.example.actor.ActorContext<String> context) {
                 context.reply("{\"message\":\"" + escape(message) + "\"}");
             }
         }, ActorOptions.builder().name("echo").build());

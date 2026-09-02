@@ -546,7 +546,7 @@ public final class ActorSystem implements AutoCloseable {
                         terminate(new CancellationException("PoisonPill"));
                         return;
                     }
-                    ActorContext context = new ActorContext(this, system, activationCancellation.token(),
+                    ActorContext<M> context = new ActorContext<>(this, system, activationCancellation.token(),
                             envelope.traceContext, envelope.reply);
                     ActorEvents.MessageEvent event = ActorEvents.beginMessage(name,
                             envelope.message.getClass().getName());
@@ -616,14 +616,14 @@ public final class ActorSystem implements AutoCloseable {
             return envelope;
         }
 
-        private void completeReply(Envelope<M> envelope, ActorContext context) {
+        private void completeReply(Envelope<M> envelope, ActorContext<M> context) {
             if (envelope.reply != null && context.replied()) {
                 envelope.reply.complete(context.takeReply());
             }
         }
 
         /** A handler that already answered keeps its answer even if it then fails. */
-        private void completeReplyOrFail(Envelope<M> envelope, ActorContext context, Throwable failure) {
+        private void completeReplyOrFail(Envelope<M> envelope, ActorContext<M> context, Throwable failure) {
             if (envelope.reply == null) return;
             if (context.replied()) envelope.reply.complete(context.takeReply());
             else completeFailure(envelope, failure);
@@ -635,7 +635,7 @@ public final class ActorSystem implements AutoCloseable {
             }
         }
 
-        private void invoke(Envelope<M> envelope, ActorContext context, ReductionBudget budget) throws Exception {
+        private void invoke(Envelope<M> envelope, ActorContext<M> context, ReductionBudget budget) throws Exception {
             java.lang.ScopedValue.where(ActorContext.CURRENT, context)
                     .where(ReductionBudget.CURRENT, budget)
                     .call(() -> {

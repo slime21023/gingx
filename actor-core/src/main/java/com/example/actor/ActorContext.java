@@ -3,10 +3,16 @@ package com.example.actor;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
-public final class ActorContext {
-    public static final java.lang.ScopedValue<ActorContext> CURRENT = java.lang.ScopedValue.newInstance();
+/**
+ * The per-message view an actor has of the runtime.
+ *
+ * <p>A context is valid only while {@code onMessage} is executing. Do not
+ * store it in actor state or use it from another thread.</p>
+ */
+public final class ActorContext<M> {
+    public static final java.lang.ScopedValue<ActorContext<?>> CURRENT = java.lang.ScopedValue.newInstance();
 
-    private final ActorRef<?> self;
+    private final ActorRef<M> self;
     private final ActorSystem system;
     private final CancellationToken cancellation;
     private final TraceContext traceContext;
@@ -14,7 +20,7 @@ public final class ActorContext {
     private Object replyValue;
     private boolean replied;
 
-    ActorContext(ActorRef<?> self, ActorSystem system, CancellationToken cancellation,
+    ActorContext(ActorRef<M> self, ActorSystem system, CancellationToken cancellation,
                  TraceContext traceContext, CompletableFuture<Object> reply) {
         this.self = Objects.requireNonNull(self, "self");
         this.system = Objects.requireNonNull(system, "system");
@@ -23,11 +29,12 @@ public final class ActorContext {
         this.reply = reply;
     }
 
-    public static ActorContext current() {
+    public static ActorContext<?> current() {
         return CURRENT.get();
     }
 
-    public ActorRef<?> self() { return self; }
+    /** The typed reference of the actor currently handling a message. */
+    public ActorRef<M> self() { return self; }
     public ActorSystem system() { return system; }
     public CancellationToken cancellation() { return cancellation; }
     public TraceContext traceContext() { return traceContext; }
