@@ -35,6 +35,7 @@ public final class ActorContext<M> {
 
     /** The typed reference of the actor currently handling a message. */
     public ActorRef<M> self() { return cell; }
+
     /** Keyed timers for this actor; see {@link Timers}. */
     public Timers<M> timers() { return cell; }
 

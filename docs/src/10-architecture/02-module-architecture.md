@@ -13,6 +13,7 @@ actor-core
    ├── actor-demo
    ├── actor-benchmarks         (benchmark only)
    ├── actor-stress              (stress-test only)
+   ├── actor-testkit             (test support)
    └── actor-tck                 (contract-test only)
 ```
 
@@ -45,6 +46,9 @@ Groovy 只在需要 DSL 或 AST instrumentation 時引入。
 ## Test-only modules
 
 以下模組不是 runtime dependency：
+
+- `actor-testkit`：`TestProbe`、`TestScheduler` 虛擬時間與 quiescence 等待。
+  它只依賴 core，應以 `test` scope 引入。
 
 - `actor-groovy-it`：Groovy compile/integration fixture。
 - `actor-stress`：壓力測試與 opt-in 百萬 Actor memory gate。

@@ -30,6 +30,32 @@ Behaviour that changed while hardening the runtime for 1.0:
   longer starts activations until it is resumed;
 - `ActorSystemOptions.deadLetterListener(...)` reports undelivered messages.
 
+API changes that make the runtime usable for a full application:
+
+- `ActorContext` is now `ActorContext<M>` and `self()` returns `ActorRef<M>`,
+  so an actor can send to itself without an unchecked cast. Handlers change
+  from `onMessage(M, ActorContext)` to `onMessage(M, ActorContext<M>)`;
+- `ask(Duration, replyTo -> message)` is the typed ask. The request carries an
+  `ActorRef<R> replyTo`, so both directions are checked at compile time and the
+  handler answers with a normal send. `ask(Class, Duration, factory)` states
+  the reply type when the call is chained. The older `ask(message, timeout)`
+  forms and `ActorContext.reply(value)` are deprecated for removal;
+- `ActorContext.timers()` provides keyed timers. Timers belong to the cell and
+  are cancelled on restart and on termination, and a message from a replaced or
+  cancelled timer is discarded before it reaches the handler;
+- `ActorSystemOptions.scheduler(...)` supplies the time source, which is how
+  timers are tested without wall-clock delays;
+- `ActorContext.stash()` and `unstashAll()` defer and redeliver messages. The
+  stash is bounded by `ActorOptions.stashCapacity` and overflow throws
+  `StashOverflowException`;
+- `ActorContext.spawnChild(...)` creates an actor whose lifetime is contained
+  in its parent: stopping a parent stops its subtree;
+- `ActorSystem.awaitQuiescent(Duration)` waits until no actor is running or
+  holds queued messages, which also serves as a drain before a planned
+  shutdown;
+- `actor-testkit` is a new test-scoped module: `TestProbe`, `TestScheduler`
+  virtual time and deadline-bounded waits.
+
 Applications should replace unbounded body reads with
 ActorHttpServer.readBody(exchange, options), handle every SendResult, and use
 ActorSystem.shutdown(Duration) during deployment termination.
