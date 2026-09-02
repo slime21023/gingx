@@ -1,0 +1,17 @@
+[book]
+title = "Preemptive Actor Runtime"
+authors = ["Preemptive Actor Runtime Contributors"]
+description = "Java 25 and Groovy 5 actor runtime: architecture, application guides and API reference."
+language = "zh-TW"
+src = "src"
+
+[build]
+build-dir = "../target/mdbook"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.search]
+enable = true

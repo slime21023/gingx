@@ -1,0 +1,41 @@
+goal: "Release the Java 25 and Groovy 5 actor runtime as a production-ready 1.0 JVM library"
+keyresults:
+  - kr-1: "MPSC queue and packed actor state pass correctness, memory and allocation gates"
+  - kr-2: "Actor runtime preserves single-threaded processing, bounded at-most-once mailbox semantics and graceful shutdown"
+  - kr-3: "Reduction/cancellation prevents CPU starvation and measured reduction overhead stays below 3 percent"
+  - kr-4: "Supervisor tree, restart policies, DeathWatch, circuit breaking and backpressure pass fault-injection tests"
+  - kr-5: "JFR, counters, optional Micrometer/Jackson adapters and bounded HTTP adapter are release-ready"
+  - kr-6: "Linux and Windows CI, API baseline, SBOM, signed internal Maven artifacts and migration docs are complete"
+rules:
+  - id: core-java-only
+    name: "core-has-no-groovy-runtime-dependency"
+    apply: "actor-core/**"
+    level: error
+    desc:
+      - "actor-core source and dependency graph must not require Groovy"
+  - id: actor-single-runner
+    name: "actor-single-threaded-invariant"
+    apply: "actor-core/src/main/java/**"
+    level: error
+    desc:
+      - "A mailbox drain must be protected by a successful packed-state transition"
+  - id: no-message-allocation
+    name: "queue-steady-state-allocation"
+    apply: "actor-core/src/main/java/com/example/queue/**"
+    level: error
+    desc:
+      - "Queue offer and poll must not allocate per message after chunks are allocated"
+  - id: bounded-production-http
+    name: "http-request-safety"
+    apply: "actor-http/src/main/java/**"
+    level: error
+    desc:
+      - "Request body size and handler execution time must be bounded by immutable options"
+  - id: release-jvm
+    name: "jvm-release-gate"
+    apply: "pom.xml"
+    level: error
+    desc:
+      - "The first production release targets JDK 25 on Linux and Windows"
+      - "Native Image is a compatibility lane and is not a blocking JVM 1.0 gate"
+
