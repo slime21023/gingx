@@ -6,6 +6,10 @@ package com.example.actor;
  * into the public reference type.
  */
 interface ActorCellView<M> extends ActorRef<M>, Timers<M> {
+    <C> ActorRef<C> spawnChild(java.util.function.Supplier<? extends Actor<C>> factory, ActorOptions options);
+
+    int childCount();
+
     void stashCurrent();
 
     void requestUnstashAll();

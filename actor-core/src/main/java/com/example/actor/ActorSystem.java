@@ -55,14 +55,30 @@ public final class ActorSystem implements AutoCloseable {
     }
 
     public <M> ManagedActorRef<M> spawnManaged(Supplier<? extends Actor<M>> factory, ActorOptions options) {
+        return spawnCell(null, factory, options);
+    }
+
+    private <M> ActorCell<M> spawnCell(ActorCell<?> parent, Supplier<? extends Actor<M>> factory,
+                                       ActorOptions options) {
         Objects.requireNonNull(factory, "factory");
         Objects.requireNonNull(options, "options");
         if (lifecycle.get() != Lifecycle.OPEN) {
             throw new IllegalStateException("ActorSystem is closed");
         }
-        String name = options.name() + "-" + ids.incrementAndGet();
-        ActorCell<M> cell = new ActorCell<>(this, factory, options, name);
+        String name = (parent == null ? "" : parent.name + "/") + options.name() + "-" + ids.incrementAndGet();
+        ActorCell<M> cell = new ActorCell<>(this, factory, options, name, parent);
         actors.add(cell);
+        if (parent != null) {
+            parent.children.add(cell);
+            if (parent.isTerminated()) {
+                // The parent terminated while this child was being created, so
+                // nothing would ever stop the child.
+                parent.children.remove(cell);
+                cell.initialize();
+                cell.stop();
+                return cell;
+            }
+        }
         cell.initialize();
         if (lifecycle.get() != Lifecycle.OPEN) {
             cell.stop();
@@ -321,6 +337,8 @@ public final class ActorSystem implements AutoCloseable {
         private final Supplier<? extends Actor<M>> factory;
         private final ActorOptions options;
         private final String name;
+        private final ActorCell<?> parent;
+        private final Set<ActorCell<?>> children = ConcurrentHashMap.newKeySet();
         private final ActorState state;
         private volatile MpscBoundedArrayQueue<Envelope<M>> mailbox;
         private final AtomicBoolean terminationNotified = new AtomicBoolean();
@@ -344,11 +362,12 @@ public final class ActorSystem implements AutoCloseable {
         private boolean unstashRequested;
 
         private ActorCell(ActorSystem system, Supplier<? extends Actor<M>> factory,
-                          ActorOptions options, String name) {
+                          ActorOptions options, String name, ActorCell<?> parent) {
             this.system = system;
             this.factory = factory;
             this.options = options;
             this.name = name;
+            this.parent = parent;
             this.state = new ActorState(options.mailboxCapacity());
         }
 
@@ -641,6 +660,16 @@ public final class ActorSystem implements AutoCloseable {
             // A single-shot timer owes exactly one message, and it is this one.
             if (!current.periodic) timers.remove(stamp.key(), current);
             return true;
+        }
+
+        @Override
+        public <C> ActorRef<C> spawnChild(Supplier<? extends Actor<C>> factory, ActorOptions options) {
+            return system.spawnCell(this, factory, options);
+        }
+
+        @Override
+        public int childCount() {
+            return children.size();
         }
 
         @Override
@@ -1064,6 +1093,14 @@ public final class ActorSystem implements AutoCloseable {
                 if (!drainHere) pendingDrainCause = cause;
             }
             if (drainHere) drainMailbox(cause);
+            // Stopping a parent stops its subtree. Termination is requested and
+            // not waited for: a child terminates on its own activation, so the
+            // parent must not block a carrier waiting for it.
+            for (ActorCell<?> child : children) {
+                child.stop();
+            }
+            children.clear();
+            if (parent != null) parent.children.remove(this);
             system.remove(this);
             if (listeners != null) listeners.forEach(listener -> listener.onTerminated(this));
         }

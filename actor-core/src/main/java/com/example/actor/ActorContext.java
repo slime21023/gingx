@@ -67,6 +67,26 @@ public final class ActorContext<M> {
         cell.requestUnstashAll();
     }
 
+    /**
+     * Creates an actor whose lifetime is contained in this one.
+     *
+     * <p>Stopping this actor stops its children, recursively, so a subtree does
+     * not outlive the actor that created it. Termination is requested rather
+     * than waited for: each child terminates on its own activation.</p>
+     *
+     * <p>Containment is a lifetime relationship, not a supervision policy. Use
+     * {@code actor-supervision} for restart strategies.</p>
+     */
+    public <C> ActorRef<C> spawnChild(java.util.function.Supplier<? extends Actor<C>> factory,
+                                      ActorOptions options) {
+        return cell.spawnChild(factory, options);
+    }
+
+    /** Children created by this actor that have not terminated. */
+    public int childCount() {
+        return cell.childCount();
+    }
+
     /** Messages currently deferred by {@link #stash()}. */
     public int stashSize() {
         return cell.stashSize();
