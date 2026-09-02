@@ -51,16 +51,24 @@ class ActorSystemTest {
 
     @Test
     void boundedMailboxReturnsFull() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
         CompletableFuture<Void> release = new CompletableFuture<>();
         try (ActorSystem system = new ActorSystem()) {
             ActorRef<Integer> ref = system.spawn(() -> new Actor<>() {
                 @Override
                 protected void onMessage(Integer message, ActorContext<Integer> context) throws Exception {
+                    entered.countDown();
                     release.get(5, TimeUnit.SECONDS);
                 }
             }, ActorOptions.builder().mailboxCapacity(1).build());
+
+            // A message leaves the mailbox when it is polled, before the handler
+            // runs, so capacity is only occupied once a later message is queued
+            // behind one that is already in flight.
             assertEquals(SendResult.ACCEPTED, ref.send(1));
-            assertEquals(SendResult.FULL, ref.send(2));
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertEquals(SendResult.ACCEPTED, ref.send(2));
+            assertEquals(SendResult.FULL, ref.send(3));
             release.complete(null);
         }
     }
