@@ -158,6 +158,11 @@ public final class ActorSystem implements AutoCloseable {
         }
     }
 
+    /** Executor used to complete ask replies away from an activation thread. */
+    java.util.concurrent.Executor replyExecutor() {
+        return executor;
+    }
+
     void deadLetter(ActorRef<?> target, Object message, DeadLetterListener.Reason reason) {
         DeadLetterListener listener = systemOptions.deadLetterListener();
         if (listener == null) return;
@@ -387,6 +392,40 @@ public final class ActorSystem implements AutoCloseable {
         }
 
         @Override
+        public <R> java.util.concurrent.CompletionStage<R> ask(
+                Duration timeout, java.util.function.Function<ActorRef<R>, M> messageFactory) {
+            Objects.requireNonNull(messageFactory, "messageFactory");
+            requirePositive(timeout);
+            CompletableFuture<R> future = new CompletableFuture<>();
+            ActorRef<R> replyTo = new PromiseRef<>(future, system, name + "-reply");
+            M message = Objects.requireNonNull(messageFactory.apply(replyTo),
+                    "messageFactory returned null");
+            SendResult result = enqueue(message, null, null);
+            if (result != SendResult.ACCEPTED && result != SendResult.ACCEPTED_AFTER_DROP) {
+                future.completeExceptionally(new RejectedExecutionException("send rejected: " + result));
+            } else {
+                future.orTimeout(timeout.toNanos(), java.util.concurrent.TimeUnit.NANOSECONDS);
+            }
+            return future;
+        }
+
+        @Override
+        public <R> java.util.concurrent.CompletionStage<R> ask(
+                Class<R> responseType, Duration timeout,
+                java.util.function.Function<ActorRef<R>, M> messageFactory) {
+            Objects.requireNonNull(responseType, "responseType");
+            return ask(timeout, messageFactory);
+        }
+
+        private static void requirePositive(Duration timeout) {
+            Objects.requireNonNull(timeout, "timeout");
+            if (timeout.isNegative() || timeout.isZero()) {
+                throw new IllegalArgumentException("timeout must be positive");
+            }
+        }
+
+        @Override
+        @SuppressWarnings("removal")
         public java.util.concurrent.CompletionStage<Object> ask(M message, Duration timeout) {
             Objects.requireNonNull(timeout, "timeout");
             if (timeout.isNegative() || timeout.isZero()) {
@@ -403,6 +442,7 @@ public final class ActorSystem implements AutoCloseable {
         }
 
         @Override
+        @SuppressWarnings("removal")
         public <R> java.util.concurrent.CompletionStage<R> ask(M message, Duration timeout, Class<R> responseType) {
             Objects.requireNonNull(responseType, "responseType");
             return ask(message, timeout).thenApply(responseType::cast);
